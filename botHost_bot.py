@@ -488,7 +488,6 @@ def load_data_to_memory():
 def add_category_db(family_id, name, category_type, parent_id=None):
     with get_db() as conn:
         cursor = conn.cursor()
-        # Исправлено: правильно обрабатываем parent_id = None
         if parent_id is None:
             cursor.execute(
                 "SELECT 1 FROM categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS NULL",
@@ -520,7 +519,6 @@ def get_categories_db(family_id, category_type=None, parent_id=None):
             query += " AND parent_id = ?"
             params.append(parent_id)
         else:
-            # ВАЖНО: для родительских категорий показываем только те, у которых parent_id IS NULL
             query += " AND parent_id IS NULL"
         query += " ORDER BY name"
         cursor.execute(query, params)
@@ -1211,6 +1209,13 @@ def handle_category_selection(message):
 
     logging.info(f"🔍 Выбрана категория: {selected_label}")
 
+    # ПРОВЕРКА: Если в состоянии уже есть selected_category_id,
+    # значит это выбор подкатегории
+    if "selected_category_id" in state:
+        logging.info("📌 Это выбор ПОДКАТЕГОРИИ, перенаправляем...")
+        handle_subcategory_selection(message)
+        return
+
     categories = state.get("categories", [])
     category = None
 
@@ -1308,9 +1313,11 @@ def handle_category_selection(message):
     and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
     and message.text in ["➡️ Без подкатегории", "❌ Отмена"]
 )
-def handle_subcategory_or_cancel(message):
+def handle_subcategory_special(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
+
+    logging.info(f"🔍 СПЕЦИАЛЬНАЯ КНОПКА: {message.text}")
 
     if message.text == "❌ Отмена":
         delete_user_state_db(user_id)
@@ -1319,24 +1326,35 @@ def handle_subcategory_or_cancel(message):
         )
         return
 
-    state["category_id"] = state["selected_category_id"]
-    state["category_name"] = state["selected_category_name"]
-    state["subcategory"] = None
-    state["action"] = "add_transaction"
-    save_user_state_db(user_id, state)
+    if message.text == "➡️ Без подкатегории":
+        if "selected_category_id" not in state or "selected_category_name" not in state:
+            bot.send_message(
+                message.chat.id,
+                "❌ Ошибка: данные потеряны. Начните заново.",
+                reply_markup=get_main_menu(),
+            )
+            delete_user_state_db(user_id)
+            return
 
-    msg = bot.send_message(
-        message.chat.id,
-        f"Вы выбрали: *{state['category_name']}*.\nВведите сумму цифрами:",
-        parse_mode="Markdown",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
-    bot.register_next_step_handler(msg, handle_amount)
+        state["category_id"] = state["selected_category_id"]
+        state["category_name"] = state["selected_category_name"]
+        state["subcategory"] = None
+        state["action"] = "add_transaction"
+        save_user_state_db(user_id, state)
+
+        msg = bot.send_message(
+            message.chat.id,
+            f"Вы выбрали: *{state['category_name']}*.\nВведите сумму цифрами:",
+            parse_mode="Markdown",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        bot.register_next_step_handler(msg, handle_amount)
 
 
 @bot.message_handler(
     func=lambda message: message.text
     and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+    and message.text not in ["➡️ Без подкатегории", "❌ Отмена"]
 )
 def handle_subcategory_selection(message):
     user_id = message.from_user.id
@@ -1345,76 +1363,76 @@ def handle_subcategory_selection(message):
 
     logging.info("=" * 50)
     logging.info(f"🔍 Выбрана подкатегория: '{selected_subcategory}'")
-    logging.info(f"📦 Состояние: {state}")
 
-    # Проверяем отмену
-    if selected_subcategory == "❌ Отмена":
-        delete_user_state_db(user_id)
+    # Проверяем состояние
+    if "subcategories" not in state:
+        logging.error("❌ В СОСТОЯНИИ НЕТ subcategories!")
         bot.send_message(
-            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
-        )
-        return
-
-    # Проверяем выбор "Без подкатегории"
-    if selected_subcategory == "➡️ Без подкатегории":
-        state["category_id"] = state["selected_category_id"]
-        state["category_name"] = state["selected_category_name"]
-        state["subcategory"] = None
-        state["action"] = "add_transaction"
-        save_user_state_db(user_id, state)
-        msg = bot.send_message(
             message.chat.id,
-            f"Вы выбрали: *{state['category_name']}*.\nВведите сумму цифрами:",
-            parse_mode="Markdown",
-            reply_markup=types.ReplyKeyboardRemove(),
+            "❌ Ошибка: список подкатегорий потерян. Начните заново.",
+            reply_markup=get_main_menu(),
         )
-        bot.register_next_step_handler(msg, handle_amount)
+        delete_user_state_db(user_id)
         return
 
-    # Получаем список подкатегорий из состояния
     subcategories = state.get("subcategories", [])
     logging.info(f"📂 Доступно подкатегорий: {len(subcategories)}")
     for sub in subcategories:
-        logging.info(f"  - '{sub['name']}' (id={sub['id']})")
+        logging.info(f"  - '{sub['name']}' (id={sub.get('id')})")
 
-    # Ищем подкатегорию по точному совпадению
+    if not subcategories:
+        logging.error("❌ СПИСОК ПОДКАТЕГОРИЙ ПУСТ!")
+        bot.send_message(
+            message.chat.id,
+            "❌ Ошибка: нет доступных подкатегорий. Начните заново.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    # Ищем подкатегорию
     selected_sub = None
+
+    # 1. Точное совпадение
     for sub in subcategories:
         if sub["name"] == selected_subcategory:
             selected_sub = sub
+            logging.info(f"✅ Найдено по точному совпадению: {sub['name']}")
             break
 
-    # Если не нашли, пробуем без эмодзи
+    # 2. Без эмодзи
     if not selected_sub:
         clean_label = "".join(
             ch for ch in selected_subcategory if ch.isalnum() or ch.isspace()
         ).strip()
+        logging.info(f"🔍 Ищем без эмодзи: '{clean_label}'")
         for sub in subcategories:
             clean_sub = "".join(
                 ch for ch in sub["name"] if ch.isalnum() or ch.isspace()
             ).strip()
             if clean_sub == clean_label:
                 selected_sub = sub
+                logging.info(f"✅ Найдено без эмодзи: {sub['name']}")
                 break
 
     if not selected_sub:
-        logging.error(f"❌ Подкатегория не найдена: {selected_subcategory}")
+        logging.error(f"❌ ПОДКАТЕГОРИЯ НЕ НАЙДЕНА: '{selected_subcategory}'")
         available = [sub["name"] for sub in subcategories]
-        logging.error(f"   Доступно: {available}")
+        logging.error(f"   ДОСТУПНО: {available}")
         bot.send_message(
             message.chat.id,
-            f"❌ Подкатегория '{selected_subcategory}' не найдена. Пожалуйста, выберите из списка.",
+            f"❌ Подкатегория не найдена. Пожалуйста, выберите из списка.",
             reply_markup=get_main_menu(),
         )
         delete_user_state_db(user_id)
         return
 
     logging.info(
-        f"✅ Найдена подкатегория: {selected_sub['name']} (id={selected_sub['id']})"
+        f"✅ НАЙДЕНА ПОДКАТЕГОРИЯ: {selected_sub['name']} (id={selected_sub['id']})"
     )
 
     # Сохраняем выбранную подкатегорию
-    parent_name = state["selected_category_name"]
+    parent_name = state.get("selected_category_name", "Категория")
     state["category_id"] = selected_sub["id"]
     state["category_name"] = f"{parent_name} → {selected_sub['name']}"
     state["subcategory"] = selected_sub["name"]
