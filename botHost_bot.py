@@ -81,7 +81,7 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state_data TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS custom_categories (id INTEGER PRIMARY KEY AUTOINCREMENT, family_id INTEGER NOT NULL, name TEXT NOT NULL, type TEXT CHECK(type IN ('expense', 'income')), parent_id INTEGER DEFAULT NULL, is_standard INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (family_id) REFERENCES families (family_id), FOREIGN KEY (parent_id) REFERENCES custom_categories(id), UNIQUE(family_id, name, type, parent_id))"
+            "CREATE TABLE IF NOT EXISTS custom_categories (id INTEGER PRIMARY KEY AUTOINCREMENT, family_id INTEGER NOT NULL, name TEXT NOT NULL, type TEXT CHECK(type IN ('expense', 'income')), parent_id INTEGER DEFAULT NULL, parent_name TEXT DEFAULT NULL, is_standard INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (family_id) REFERENCES families (family_id), FOREIGN KEY (parent_id) REFERENCES custom_categories(id), UNIQUE(family_id, name, type, parent_id, parent_name))"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_transactions_family ON transactions(family_id)"
@@ -358,19 +358,32 @@ def load_data_to_memory():
 
 
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С КАТЕГОРИЯМИ ---
-def add_custom_category_db(family_id, name, category_type, parent_id=None):
+def add_custom_category_db(
+    family_id, name, category_type, parent_id=None, parent_name=None
+):
     with get_db() as conn:
         cursor = conn.cursor()
         # Проверяем, нет ли уже такой категории у этой семьи
-        cursor.execute(
-            "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS ?",
-            (family_id, name, category_type, parent_id),
-        )
+        if parent_id is not None:
+            cursor.execute(
+                "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id = ?",
+                (family_id, name, category_type, parent_id),
+            )
+        elif parent_name is not None:
+            cursor.execute(
+                "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_name = ?",
+                (family_id, name, category_type, parent_name),
+            )
+        else:
+            cursor.execute(
+                "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS NULL",
+                (family_id, name, category_type),
+            )
         if cursor.fetchone():
             return False
         cursor.execute(
-            "INSERT INTO custom_categories (family_id, name, type, parent_id) VALUES (?, ?, ?, ?)",
-            (family_id, name, category_type, parent_id),
+            "INSERT INTO custom_categories (family_id, name, type, parent_id, parent_name) VALUES (?, ?, ?, ?, ?)",
+            (family_id, name, category_type, parent_id, parent_name),
         )
         return True
 
@@ -415,47 +428,6 @@ def delete_custom_category_db(category_id, family_id):
             (category_id, family_id),
         )
         return True
-
-
-def get_category_tree_db(family_id, category_type):
-    """Возвращает дерево категорий для отображения"""
-    custom_cats = get_custom_categories_db(family_id, category_type)
-    # Строим дерево
-    tree = []
-    # Сначала добавляем стандартные категории
-    standard_cats = (
-        EXPENSE_CATEGORIES if category_type == "expense" else INCOME_CATEGORIES
-    )
-    for std_cat in standard_cats:
-        # Ищем подкатегории для этой стандартной категории
-        subcats = [
-            c
-            for c in custom_cats
-            if c["parent_id"] is None and c["is_standard"] == 1 and c["name"] == std_cat
-        ]
-        # На самом деле is_standard = 1 означает, что это подкатегория стандартной категории
-        # Мы будем хранить parent_name для привязки к стандартной категории
-        # Но в текущей реализации проще: подкатегории хранятся с parent_id = NULL,
-        # а is_standard = 1 означает, что это подкатегория стандартной категории
-        # Имя стандартной категории будем хранить в отдельном поле или просто по контексту
-        # Для упрощения: подкатегории стандартных категорий будем хранить с parent_id = -1 (специальное значение)
-        pass
-    # Для простоты реализации пока сделаем плоский список с группировкой
-    return custom_cats
-
-
-def get_subcategories_for_parent_db(family_id, parent_name, category_type):
-    """Получает подкатегории для родительской категории (стандартной или пользовательской)"""
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # Ищем подкатегории, где parent_id ссылается на категорию с именем parent_name
-        # Это сложно, проще хранить parent_name явно
-        # Для простоты пока будем хранить parent_id = -1 для стандартных категорий
-        cursor.execute(
-            "SELECT * FROM custom_categories WHERE family_id = ? AND type = ? AND parent_id IS NULL AND is_standard = 0 ORDER BY name",
-            (family_id, category_type),
-        )
-        return [dict(row) for row in cursor.fetchall()]
 
 
 # --- КНОПКИ МЕНЮ ---
@@ -818,16 +790,36 @@ def add_subcategory_name(message):
     parent_name = state["parent_name"]
 
     # Определяем, является ли родитель стандартной или пользовательской категорией
-    is_standard = False
     standard_cats = EXPENSE_CATEGORIES + INCOME_CATEGORIES
     if parent_name in standard_cats:
-        is_standard = True
-        # Для стандартной категории мы не храним её в custom_categories
-        # Поэтому parent_id = None, но мы будем знать, что это стандартная категория
-        category_type = "expense" if parent_name in EXPENSE_CATEGORIES else "income"
+        # Для стандартной категории сохраняем parent_name
+        is_standard = 1
         parent_id = None
+        category_type = "expense" if parent_name in EXPENSE_CATEGORIES else "income"
+
+        # Проверяем, не существует ли уже такой подкатегории у этой стандартной категории
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_name = ?",
+                (family_id, name, category_type, parent_name),
+            )
+            if cursor.fetchone():
+                bot.send_message(
+                    message.chat.id,
+                    f"❌ Подкатегория «{name}» уже существует для «{parent_name}».",
+                    reply_markup=get_main_menu(),
+                )
+                delete_user_state_db(user_id)
+                return
+
+            # Добавляем подкатегорию с parent_name
+            cursor.execute(
+                "INSERT INTO custom_categories (family_id, name, type, parent_id, parent_name, is_standard) VALUES (?, ?, ?, ?, ?, ?)",
+                (family_id, name, category_type, parent_id, parent_name, is_standard),
+            )
     else:
-        # Находим ID пользовательской категории
+        # Для пользовательской категории
         custom_cats = get_custom_categories_db(family_id)
         parent_cat = next((c for c in custom_cats if c["name"] == parent_name), None)
         if not parent_cat:
@@ -838,36 +830,38 @@ def add_subcategory_name(message):
             )
             delete_user_state_db(user_id)
             return
+
         category_type = parent_cat["type"]
         parent_id = parent_cat["id"]
+        is_standard = 0
 
-    # Добавляем подкатегорию с is_standard = 1 для стандартных категорий
-    with get_db() as conn:
-        cursor = conn.cursor()
-        # Проверяем, нет ли уже такой подкатегории
-        cursor.execute(
-            "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS ?",
-            (family_id, name, category_type, parent_id),
-        )
-        if cursor.fetchone():
-            bot.send_message(
-                message.chat.id,
-                f"❌ Подкатегория «{name}» уже существует.",
-                reply_markup=get_main_menu(),
+        # Проверяем, не существует ли уже такой подкатегории
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id = ?",
+                (family_id, name, category_type, parent_id),
             )
-            delete_user_state_db(user_id)
-            return
+            if cursor.fetchone():
+                bot.send_message(
+                    message.chat.id,
+                    f"❌ Подкатегория «{name}» уже существует для «{parent_name}».",
+                    reply_markup=get_main_menu(),
+                )
+                delete_user_state_db(user_id)
+                return
 
-        cursor.execute(
-            "INSERT INTO custom_categories (family_id, name, type, parent_id, is_standard) VALUES (?, ?, ?, ?, ?)",
-            (family_id, name, category_type, parent_id, 1 if is_standard else 0),
-        )
-        delete_user_state_db(user_id)
-        bot.send_message(
-            message.chat.id,
-            f"✅ Подкатегория «{name}» добавлена к «{parent_name}»!",
-            reply_markup=get_main_menu(),
-        )
+            cursor.execute(
+                "INSERT INTO custom_categories (family_id, name, type, parent_id, is_standard) VALUES (?, ?, ?, ?, ?)",
+                (family_id, name, category_type, parent_id, is_standard),
+            )
+
+    delete_user_state_db(user_id)
+    bot.send_message(
+        message.chat.id,
+        f"✅ Подкатегория «{name}» добавлена к «{parent_name}»!",
+        reply_markup=get_main_menu(),
+    )
 
 
 @bot.message_handler(func=lambda message: message.text == "🗑️ Удалить категорию")
@@ -897,6 +891,9 @@ def delete_category_start(message):
                 label = f"↳ {cat['name']} (→ {parent['name']})"
             else:
                 label = f"↳ {cat['name']}"
+        elif cat["parent_name"] is not None:
+            # Подкатегория стандартной категории
+            label = f"↳ {cat['name']} (→ {cat['parent_name']})"
         markup.add(types.KeyboardButton(label))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
@@ -972,7 +969,9 @@ def list_categories(message):
         response += f"• {cat} (стандартная)\n"
     # Пользовательские
     custom_cats = get_custom_categories_db(family_id, "expense")
-    parent_cats = [c for c in custom_cats if c["parent_id"] is None]
+    parent_cats = [
+        c for c in custom_cats if c["parent_id"] is None and c["parent_name"] is None
+    ]
     for cat in parent_cats:
         response += f"• {cat['name']} (ваша)\n"
         # Подкатегории
@@ -980,17 +979,29 @@ def list_categories(message):
         for sub in subcats:
             response += f"  ↳ {sub['name']}\n"
 
+    # Подкатегории стандартных категорий
+    for cat in custom_cats:
+        if cat["parent_name"] is not None:
+            response += f"  ↳ {cat['name']} (подкатегория для {cat['parent_name']})\n"
+
     # Доходы
     response += "\n📈 **Доходы:**\n"
     for cat in INCOME_CATEGORIES:
         response += f"• {cat} (стандартная)\n"
     custom_cats = get_custom_categories_db(family_id, "income")
-    parent_cats = [c for c in custom_cats if c["parent_id"] is None]
+    parent_cats = [
+        c for c in custom_cats if c["parent_id"] is None and c["parent_name"] is None
+    ]
     for cat in parent_cats:
         response += f"• {cat['name']} (ваша)\n"
         subcats = [c for c in custom_cats if c["parent_id"] == cat["id"]]
         for sub in subcats:
             response += f"  ↳ {sub['name']}\n"
+
+    # Подкатегории стандартных категорий
+    for cat in custom_cats:
+        if cat["parent_name"] is not None:
+            response += f"  ↳ {cat['name']} (подкатегория для {cat['parent_name']})\n"
 
     bot.send_message(message.chat.id, response, parse_mode="Markdown")
 
@@ -1022,7 +1033,9 @@ def handle_menu(message):
 
     # Пользовательские (только родительские)
     custom_cats = get_custom_categories_db(family_id, trans_type)
-    parent_cats = [c for c in custom_cats if c["parent_id"] is None]
+    parent_cats = [
+        c for c in custom_cats if c["parent_id"] is None and c["parent_name"] is None
+    ]
     for cat in parent_cats:
         categories.append({"name": cat["name"], "is_standard": False, "id": cat["id"]})
 
@@ -1067,29 +1080,22 @@ def handle_category_selection(message):
     state = get_user_state_db(user_id)
     selected_category = message.text
 
-    # Проверяем, есть ли подкатегории для этой категории
     family_id = get_user_family_db(user_id)
     trans_type = state["type"]
+
+    # Получаем подкатегории
+    subcategories = []
 
     # Проверяем, является ли категория стандартной
     standard_cats = EXPENSE_CATEGORIES if trans_type == "expense" else INCOME_CATEGORIES
     is_standard = selected_category in standard_cats
 
-    # Получаем подкатегории
-    subcategories = []
     if is_standard:
-        # Ищем подкатегории для стандартной категории (is_standard = 1)
+        # Ищем подкатегории для стандартной категории
         custom_cats = get_custom_categories_db(family_id, trans_type)
         subcategories = [
-            c for c in custom_cats if c["is_standard"] == 1 and c["parent_id"] is None
+            c for c in custom_cats if c["parent_name"] == selected_category
         ]
-        # Для стандартных категорий мы будем хранить подкатегории с parent_id = None и is_standard = 1
-        # Но чтобы привязать к конкретной стандартной категории, нам нужно хранить parent_name
-        # Для упрощения пока сделаем так: подкатегории стандартных категорий будем хранить с parent_id = -1
-        # И будем использовать поле parent_id = -1 для стандартных категорий
-        # В текущей реализации мы будем хранить подкатегории с parent_id = -1 для стандартных категорий
-        # Но для простоты пока оставим так, как есть
-        pass
     else:
         # Ищем подкатегории для пользовательской категории
         custom_cats = get_custom_categories_db(family_id, trans_type)
