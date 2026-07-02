@@ -679,8 +679,11 @@ def get_categories_menu():
 
 
 def get_cancel_confirmation_menu():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add(types.KeyboardButton("❌ Удалить"), types.KeyboardButton("🔙 Отмена"))
+    """Клавиатура для подтверждения отмены - ИСПРАВЛЕНО на InlineKeyboard"""
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("❌ Удалить", callback_data="cancel_confirm_yes")
+    btn2 = types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_confirm_no")
+    markup.add(btn1, btn2)
     return markup
 
 
@@ -1611,7 +1614,7 @@ def handle_amount(message):
     )
 
 
-# --- ОТМЕНА ОПЕРАЦИИ С ПОДТВЕРЖДЕНИЕМ ---
+# --- ОТМЕНА ОПЕРАЦИИ С ПОДТВЕРЖДЕНИЕМ (ИСПРАВЛЕНО) ---
 @bot.message_handler(func=lambda message: message.text == "↩️ Отменить операцию")
 def cancel_last_transaction(message):
     user_id = message.from_user.id
@@ -1664,7 +1667,7 @@ def cancel_last_transaction(message):
         f"🏷️ {last_trans['category_name']}"
     )
 
-    # СРАЗУ показываем меню подтверждения
+    # ПОКАЗЫВАЕМ InlineKeyboard меню подтверждения
     bot.send_message(
         message.chat.id,
         message_text,
@@ -1673,51 +1676,59 @@ def cancel_last_transaction(message):
     )
 
 
-@bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "confirm_cancel"
-)
-def handle_cancel_confirmation(message):
-    user_id = message.from_user.id
+# --- ОБРАБОТЧИК CALLBACK ДЛЯ ОТМЕНЫ (НОВЫЙ) ---
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_confirm_"))
+def handle_cancel_callback(call):
+    user_id = call.from_user.id
     state = get_user_state_db(user_id)
 
-    logging.info(f"🔍 Обработка подтверждения отмены: {message.text}")
+    logging.info(f"🔍 Callback отмены: {call.data}")
 
-    if message.text == "🔙 Отмена":
+    if call.data == "cancel_confirm_no":
         delete_user_state_db(user_id)
-        bot.send_message(
-            message.chat.id,
+        bot.edit_message_text(
             "Операция отменена.",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+        )
+        bot.send_message(
+            call.message.chat.id,
+            "Возвращаемся в главное меню.",
             reply_markup=get_main_menu(),
         )
+        bot.answer_callback_query(call.id)
         return
 
-    if message.text == "❌ Удалить":
+    if call.data == "cancel_confirm_yes":
         transaction_id = state.get("transaction_id")
         if transaction_id:
             delete_transaction_db(transaction_id)
             load_data_to_memory()
             delete_user_state_db(user_id)
-            bot.send_message(
-                message.chat.id,
+            bot.edit_message_text(
                 "✅ Операция успешно удалена!",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+            bot.send_message(
+                call.message.chat.id,
+                "Возвращаемся в главное меню.",
                 reply_markup=get_main_menu(),
             )
         else:
             delete_user_state_db(user_id)
-            bot.send_message(
-                message.chat.id,
+            bot.edit_message_text(
                 "❌ Ошибка: операция не найдена.",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+            bot.send_message(
+                call.message.chat.id,
+                "Возвращаемся в главное меню.",
                 reply_markup=get_main_menu(),
             )
+        bot.answer_callback_query(call.id)
         return
-
-    # Если пользователь ввел что-то другое - показываем меню снова
-    bot.send_message(
-        message.chat.id,
-        "Пожалуйста, выберите один из предложенных вариантов:",
-        reply_markup=get_cancel_confirmation_menu(),
-    )
 
 
 # --- ИСТОРИЯ И БАЛАНС ---
@@ -2329,7 +2340,7 @@ def delete_limit_cancel(message):
     )
 
 
-# --- НАПОМИНАНИЯ ---
+# --- НАПОМИНАНИЯ (ИСПРАВЛЕНО) ---
 @bot.message_handler(func=lambda message: message.text == "⏰ Напоминания о платежах")
 def reminders_handler(message):
     user_id = message.from_user.id
@@ -2599,40 +2610,74 @@ def add_reminder_day_of_week(message):
 
 
 def ask_notify_days(message):
-    """Показывает меню выбора дней для напоминания"""
+    """Показывает меню выбора дней для напоминания - ИСПРАВЛЕНО"""
+    user_id = message.from_user.id
+
+    # Убеждаемся, что состояние не сбросилось
+    state = get_user_state_db(user_id)
+    if not state or state.get("action") != "add_reminder":
+        bot.send_message(
+            message.chat.id,
+            "Ошибка сессии. Начните добавление напоминания заново.",
+            reply_markup=get_main_menu(),
+        )
+        return
+
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    markup.add(
+    markup.row(
         types.KeyboardButton("1 день"),
         types.KeyboardButton("2 дня"),
         types.KeyboardButton("3 дня"),
-        types.KeyboardButton("Не напоминать"),
-        types.KeyboardButton("❌ Отмена"),
     )
+    markup.row(types.KeyboardButton("Не напоминать"), types.KeyboardButton("❌ Отмена"))
+
+    # Сохраняем состояние с явным указанием, что мы ждем выбор дней
+    state["waiting_for"] = "notify_days"
+    save_user_state_db(user_id, state)
+
     bot.send_message(
         message.chat.id, "За сколько дней напоминать?", reply_markup=markup
     )
 
 
-# ВАЖНО: Этот хендлер должен быть объявлен ДО общих хендлеров!
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
-    and message.text in ["1 день", "2 дня", "3 дня", "Не напоминать", "❌ Отмена"]
+    func=lambda message: get_user_state_db(message.from_user.id).get("action")
+    == "add_reminder"
+    and get_user_state_db(message.from_user.id).get("waiting_for") == "notify_days"
 )
 def add_reminder_notify_days(message):
     user_id = message.from_user.id
+    text = message.text
 
-    logging.info(f"🔍 Выбор дней для напоминания: {message.text}")
+    logging.info(f"🔍 Выбор дней для напоминания: {text}")
 
-    if message.text == "❌ Отмена":
+    if text == "❌ Отмена":
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
         )
         return
 
+    # Проверяем, что текст - это одна из допустимых кнопок
+    if text not in ["1 день", "2 дня", "3 дня", "Не напоминать"]:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.row(
+            types.KeyboardButton("1 день"),
+            types.KeyboardButton("2 дня"),
+            types.KeyboardButton("3 дня"),
+        )
+        markup.row(
+            types.KeyboardButton("Не напоминать"), types.KeyboardButton("❌ Отмена")
+        )
+        bot.send_message(
+            message.chat.id,
+            "Пожалуйста, выберите один из вариантов:",
+            reply_markup=markup,
+        )
+        return
+
     days_map = {"1 день": [1], "2 дня": [2], "3 дня": [3], "Не напоминать": []}
-    notify_days = days_map.get(message.text, [1])
+    notify_days = days_map.get(text, [1])
 
     state = get_user_state_db(user_id)
     if not state or state.get("action") != "add_reminder":
@@ -2659,7 +2704,6 @@ def add_reminder_notify_days(message):
     load_data_to_memory()
     delete_user_state_db(user_id)
 
-    # Формируем сообщение с подтверждением
     freq_text = "Ежемесячно" if reminder["frequency"] == "monthly" else "Еженедельно"
     notify_text = (
         ", ".join([f"{d} дн." for d in notify_days]) if notify_days else "Не напоминать"
