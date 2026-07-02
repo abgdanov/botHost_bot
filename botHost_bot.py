@@ -11,12 +11,15 @@ import os
 import sys
 from contextlib import contextmanager
 
+# Импортируем словарь эмодзи
+from emoji_dict import get_emoji
+
 # Включаем логирование
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# --- ЗАГРУЗКА ТОКЕНА (из переменных окружения Bothost) ---
+# --- ЗАГРУЗКА ТОКЕНА ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     print("❌ ОШИБКА: Токен не найден! Установите переменную TELEGRAM_BOT_TOKEN")
@@ -249,22 +252,56 @@ def get_category_full_name(category_id):
 
 
 def get_category_emoji(category_name):
-    emoji_map = {
-        "Продукты": "🛒",
-        "Авто": "🚗",
-        "Транспорт": "🚗",
-        "Здоровье": "💊",
-        "Отдых": "🎉",
-        "Платежи": "💳",
-        "Зарплата": "💰",
-        "Подработка": "💼",
-        "Подарки": "🎁",
-        "Другое": "📦",
-    }
-    for key, emoji in emoji_map.items():
-        if key in category_name:
-            return emoji
-    return "📌"
+    """Получить эмодзи для категории из отдельного файла"""
+    if not category_name:
+        return "📌"
+
+    # Проверяем, есть ли уже эмодзи в начале названия
+    first_char = category_name[0]
+    emoji_ranges = [
+        (0x1F600, 0x1F64F),  # смайлики
+        (0x1F300, 0x1F5FF),  # символы и пиктограммы
+        (0x1F680, 0x1F6FF),  # транспорт
+        (0x2600, 0x26FF),  # прочие символы
+        (0x2700, 0x27BF),  # Dingbats
+    ]
+    code = ord(first_char)
+    for start, end in emoji_ranges:
+        if start <= code <= end:
+            return first_char
+
+    # Используем словарь из отдельного файла
+    return get_emoji(category_name)
+
+
+def add_emoji_to_category_name(name):
+    """Автоматически добавляет эмодзи к названию категории, если его нет"""
+    if not name:
+        return name
+
+    # Проверяем, есть ли уже эмодзи в начале
+    first_char = name[0]
+    emoji_ranges = [
+        (0x1F600, 0x1F64F),  # смайлики
+        (0x1F300, 0x1F5FF),  # символы и пиктограммы
+        (0x1F680, 0x1F6FF),  # транспорт
+        (0x2600, 0x26FF),  # прочие символы
+        (0x2700, 0x27BF),  # Dingbats
+    ]
+    code = ord(first_char)
+    for start, end in emoji_ranges:
+        if start <= code <= end:
+            return name  # уже есть эмодзи
+
+    # Ищем подходящий эмодзи
+    emoji = get_category_emoji(name)
+
+    # Если нашли эмодзи и это не "📌" (значит есть совпадение)
+    if emoji and emoji != "📌":
+        if not name.startswith(emoji):
+            return f"{emoji} {name}"
+
+    return name
 
 
 def get_budget_limits_db(family_id):
@@ -520,7 +557,8 @@ def get_categories_db(family_id, category_type=None, parent_id=None):
             params.append(parent_id)
         else:
             query += " AND parent_id IS NULL"
-        query += " ORDER BY name"
+        # Сортировка: сначала пользовательские (family_id NOT NULL), потом стандартные
+        query += " ORDER BY CASE WHEN family_id IS NOT NULL THEN 0 ELSE 1 END, name"
         cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
@@ -646,7 +684,12 @@ def get_cancel_confirmation_menu():
     return markup
 
 
-# --- ОСНОВНЫЕ ОБРАБОТЧИКИ СООБЩЕНИЙ ---
+# ============================================
+# ========== ВСЕ ХЕНДЛЕРЫ КНОПОК ============
+# ============================================
+
+
+# --- ГЛАВНОЕ МЕНЮ ---
 @bot.message_handler(commands=["start"])
 def start_message(message):
     user_id = message.from_user.id
@@ -667,6 +710,7 @@ def start_message(message):
         )
 
 
+# --- АВТОРИЗАЦИЯ ---
 @bot.message_handler(func=lambda message: message.text == "🏠 Создать новую семью")
 def create_family(message):
     user_id = message.from_user.id
@@ -725,7 +769,7 @@ def save_family_id(message):
     )
 
 
-# --- УПРАВЛЕНИЕ КАТЕГОРИЯМИ ---
+# --- КАТЕГОРИИ ---
 @bot.message_handler(func=lambda message: message.text == "🏷️ Категории")
 def categories_handler(message):
     user_id = message.from_user.id
@@ -763,14 +807,32 @@ def add_category_start(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text in ["💰 Расход", "📈 Доход"]
+    func=lambda message: message.text == "💰 Расход"
     and get_user_state_db(message.from_user.id).get("action") == "add_category"
 )
-def add_category_type(message):
+def add_category_type_expense(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-    category_type = "expense" if message.text == "💰 Расход" else "income"
-    state["category_type"] = category_type
+    state["category_type"] = "expense"
+    save_user_state_db(user_id, state)
+    msg = bot.send_message(
+        message.chat.id,
+        "Введите название категории:\n\n"
+        "Например: «🚕 Такси», «💻 Подписки»\n"
+        "❌ Отмена",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    bot.register_next_step_handler(msg, add_category_name)
+
+
+@bot.message_handler(
+    func=lambda message: message.text == "📈 Доход"
+    and get_user_state_db(message.from_user.id).get("action") == "add_category"
+)
+def add_category_type_income(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    state["category_type"] = "income"
     save_user_state_db(user_id, state)
     msg = bot.send_message(
         message.chat.id,
@@ -803,19 +865,26 @@ def add_category_name(message):
         )
         bot.register_next_step_handler(msg, add_category_name)
         return
+
+    # Автоматическое добавление эмодзи
+    name_with_emoji = add_emoji_to_category_name(name)
+    if name_with_emoji != name:
+        logging.info(f"✨ Добавлен эмодзи: '{name}' → '{name_with_emoji}'")
+
     family_id = get_user_family_db(user_id)
     category_type = state["category_type"]
-    if add_category_db(family_id, name, category_type):
+
+    if add_category_db(family_id, name_with_emoji, category_type):
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id,
-            f"✅ Категория «{name}» добавлена!",
+            f"✅ Категория «{name_with_emoji}» добавлена!",
             reply_markup=get_main_menu(),
         )
     else:
         msg = bot.send_message(
             message.chat.id,
-            f"❌ Категория «{name}» уже существует. Введите другое название:",
+            f"❌ Категория «{name_with_emoji}» уже существует. Введите другое название:",
         )
         bot.register_next_step_handler(msg, add_category_name)
 
@@ -914,21 +983,28 @@ def add_subcategory_name(message):
         bot.register_next_step_handler(msg, add_subcategory_name)
         return
 
+    # Автоматическое добавление эмодзи
+    name_with_emoji = add_emoji_to_category_name(name)
+    if name_with_emoji != name:
+        logging.info(
+            f"✨ Добавлен эмодзи для подкатегории: '{name}' → '{name_with_emoji}'"
+        )
+
     family_id = get_user_family_db(user_id)
     parent_id = state["parent_id"]
     category_type = state.get("category_type")
 
-    if add_category_db(family_id, name, category_type, parent_id):
+    if add_category_db(family_id, name_with_emoji, category_type, parent_id):
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id,
-            f"✅ Подкатегория «{name}» добавлена к «{state['parent_name']}»!",
+            f"✅ Подкатегория «{name_with_emoji}» добавлена к «{state['parent_name']}»!",
             reply_markup=get_main_menu(),
         )
     else:
         msg = bot.send_message(
             message.chat.id,
-            f"❌ Подкатегория «{name}» уже существует. Введите другое название:",
+            f"❌ Подкатегория «{name_with_emoji}» уже существует. Введите другое название:",
         )
         bot.register_next_step_handler(msg, add_subcategory_name)
 
@@ -1540,18 +1616,20 @@ def handle_amount(message):
 def cancel_last_transaction(message):
     user_id = message.from_user.id
     family_id = get_user_family_db(user_id)
+
     if not family_id:
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
         )
         return
 
-    # Проверяем, есть ли состояние отмены
+    # Проверяем, есть ли уже состояние отмены
     state = get_user_state_db(user_id)
     if state.get("action") == "confirm_cancel":
+        # Если уже в процессе отмены - просто показываем меню
         bot.send_message(
             message.chat.id,
-            "⚠️ Вы уже в процессе отмены. Выберите «❌ Удалить» или «🔙 Отмена».",
+            "⚠️ Вы уже в процессе отмены. Выберите действие:",
             reply_markup=get_cancel_confirmation_menu(),
         )
         return
@@ -1568,12 +1646,12 @@ def cancel_last_transaction(message):
     # Очищаем любые другие состояния
     delete_user_state_db(user_id)
 
+    # Сохраняем состояние отмены
     save_user_state_db(
         user_id,
         {
             "action": "confirm_cancel",
             "transaction_id": last_trans["id"],
-            "transaction_info": f"{last_trans['type']} на сумму {last_trans['amount']:.2f} руб. ({last_trans['category_name']})",
         },
     )
 
@@ -1586,6 +1664,7 @@ def cancel_last_transaction(message):
         f"🏷️ {last_trans['category_name']}"
     )
 
+    # СРАЗУ показываем меню подтверждения
     bot.send_message(
         message.chat.id,
         message_text,
@@ -1633,10 +1712,10 @@ def handle_cancel_confirmation(message):
             )
         return
 
-    # Если пользователь ввел что-то другое
+    # Если пользователь ввел что-то другое - показываем меню снова
     bot.send_message(
         message.chat.id,
-        "Пожалуйста, выберите один из предложенных вариантов: «❌ Удалить» или «🔙 Отмена».",
+        "Пожалуйста, выберите один из предложенных вариантов:",
         reply_markup=get_cancel_confirmation_menu(),
     )
 
@@ -1910,7 +1989,8 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
             bar_length = int((amount / sorted_cats[0][1]) * 20) if sorted_cats else 0
             bar = "█" * bar_length + "░" * (20 - bar_length)
 
-            response += f"{get_category_emoji(cat_name)} {cat_name}: {amount:.2f} руб. ({percentage:.1f}%)\n"
+            emoji = get_category_emoji(cat_name)
+            response += f"{emoji} {cat_name}: {amount:.2f} руб. ({percentage:.1f}%)\n"
             response += f"   `{bar}`\n"
 
     previous_end = start_date - timedelta(days=1)
@@ -1969,7 +2049,8 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
                 )
             )
             user_name = exp["user_name"]
-            response += f"{i}. {get_category_emoji(cat_name)} {cat_name}: {exp['amount']:.2f} руб. ({date_str}, {user_name})\n"
+            emoji = get_category_emoji(cat_name)
+            response += f"{i}. {emoji} {cat_name}: {exp['amount']:.2f} руб. ({date_str}, {user_name})\n"
 
     bot.send_message(
         chat_id, response, parse_mode="Markdown", reply_markup=get_main_menu()
@@ -2267,7 +2348,8 @@ def reminders_handler(message):
 
 @bot.message_handler(func=lambda message: message.text == "➕ Добавить напоминание")
 def add_reminder_start(message):
-    save_user_state_db(message.from_user.id, {"action": "add_reminder"})
+    user_id = message.from_user.id
+    save_user_state_db(user_id, {"action": "add_reminder"})
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add(
         types.KeyboardButton("💰 Расход"),
@@ -2476,7 +2558,8 @@ def add_reminder_day_of_month(message):
         return
     state["reminder_day"] = day
     save_user_state_db(user_id, state)
-    ask_notify_days(message.chat.id, user_id)
+    # Показываем меню выбора дней напоминания
+    ask_notify_days(message)
 
 
 @bot.message_handler(
@@ -2511,10 +2594,12 @@ def add_reminder_day_of_week(message):
         return
     state["reminder_day"] = days_map[message.text]
     save_user_state_db(user_id, state)
-    ask_notify_days(message.chat.id, user_id)
+    # Показываем меню выбора дней напоминания
+    ask_notify_days(message)
 
 
-def ask_notify_days(chat_id, user_id):
+def ask_notify_days(message):
+    """Показывает меню выбора дней для напоминания"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add(
         types.KeyboardButton("1 день"),
@@ -2523,9 +2608,12 @@ def ask_notify_days(chat_id, user_id):
         types.KeyboardButton("Не напоминать"),
         types.KeyboardButton("❌ Отмена"),
     )
-    bot.send_message(chat_id, "За сколько дней напоминать?", reply_markup=markup)
+    bot.send_message(
+        message.chat.id, "За сколько дней напоминать?", reply_markup=markup
+    )
 
 
+# ВАЖНО: Этот хендлер должен быть объявлен ДО общих хендлеров!
 @bot.message_handler(
     func=lambda message: message.text
     and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
@@ -2533,6 +2621,8 @@ def ask_notify_days(chat_id, user_id):
 )
 def add_reminder_notify_days(message):
     user_id = message.from_user.id
+
+    logging.info(f"🔍 Выбор дней для напоминания: {message.text}")
 
     if message.text == "❌ Отмена":
         delete_user_state_db(user_id)
