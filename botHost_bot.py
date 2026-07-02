@@ -520,6 +520,7 @@ def get_categories_db(family_id, category_type=None, parent_id=None):
             query += " AND parent_id = ?"
             params.append(parent_id)
         else:
+            # ВАЖНО: для родительских категорий показываем только те, у которых parent_id IS NULL
             query += " AND parent_id IS NULL"
         query += " ORDER BY name"
         cursor.execute(query, params)
@@ -1212,11 +1213,13 @@ def handle_category_selection(message):
     categories = state.get("categories", [])
     category = None
 
+    # Ищем категорию по точному совпадению
     for c in categories:
         if c["name"] == selected_label:
             category = c
             break
 
+    # Если не нашли, пробуем без эмодзи
     if not category:
         clean_label = "".join(
             ch for ch in selected_label if ch.isalnum() or ch.isspace()
@@ -1238,7 +1241,7 @@ def handle_category_selection(message):
         delete_user_state_db(user_id)
         return
 
-    # Исправлено: ищем подкатегории ТОЛЬКО этой семьи
+    # Ищем подкатегории ТОЛЬКО этой семьи
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1258,7 +1261,9 @@ def handle_category_selection(message):
 
         state["selected_category_id"] = category["id"]
         state["selected_category_name"] = category["name"]
-        state["subcategories"] = [s["name"] for s in subcategories]
+        state["subcategories"] = (
+            subcategories  # Сохраняем полные объекты, а не только имена
+        )
         save_user_state_db(user_id, state)
 
         bot.send_message(
@@ -1342,65 +1347,44 @@ def handle_subcategory_selection(message):
         bot.register_next_step_handler(msg, handle_amount)
         return
 
+    # Получаем список подкатегорий из состояния (теперь это полные объекты)
     subcategories = state.get("subcategories", [])
-    if selected_subcategory not in subcategories:
+
+    # Ищем подкатегорию по точному совпадению имени
+    selected_sub = None
+    for sub in subcategories:
+        if sub["name"] == selected_subcategory:
+            selected_sub = sub
+            break
+
+    # Если не нашли, пробуем без эмодзи
+    if not selected_sub:
+        clean_label = "".join(
+            ch for ch in selected_subcategory if ch.isalnum() or ch.isspace()
+        ).strip()
+        for sub in subcategories:
+            clean_sub = "".join(
+                ch for ch in sub["name"] if ch.isalnum() or ch.isspace()
+            ).strip()
+            if clean_sub == clean_label:
+                selected_sub = sub
+                break
+
+    if not selected_sub:
         bot.send_message(
             message.chat.id,
-            "❌ Неверный выбор. Пожалуйста, выберите из списка.",
+            "❌ Подкатегория не найдена. Пожалуйста, выберите из списка.",
             reply_markup=get_main_menu(),
         )
         delete_user_state_db(user_id)
         return
 
-    family_id = get_user_family_db(user_id)
+    # Получаем имя родительской категории
+    parent_name = state["selected_category_name"]
 
-    # Исправлено: ищем подкатегорию сначала среди семейных
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT id FROM categories 
-               WHERE name = ? 
-               AND family_id = ? 
-               AND parent_id = ?""",
-            (selected_subcategory, family_id, state["selected_category_id"]),
-        )
-        result = cursor.fetchone()
-
-        # Если не нашли, пробуем поискать среди стандартных
-        if not result:
-            cursor.execute(
-                """SELECT id FROM categories 
-                   WHERE name = ? 
-                   AND is_standard = 1 
-                   AND parent_id = ?""",
-                (selected_subcategory, state["selected_category_id"]),
-            )
-            result = cursor.fetchone()
-
-        if not result:
-            bot.send_message(
-                message.chat.id,
-                "❌ Ошибка. Подкатегория не найдена.",
-                reply_markup=get_main_menu(),
-            )
-            delete_user_state_db(user_id)
-            return
-        subcategory_id = result["id"]
-
-    # Получаем полное имя для отображения
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name FROM categories WHERE id = ?", (state["selected_category_id"],)
-        )
-        parent_result = cursor.fetchone()
-        parent_name = (
-            parent_result["name"] if parent_result else state["selected_category_name"]
-        )
-
-    state["category_id"] = subcategory_id
-    state["category_name"] = f"{parent_name} → {selected_subcategory}"
-    state["subcategory"] = selected_subcategory
+    state["category_id"] = selected_sub["id"]
+    state["category_name"] = f"{parent_name} → {selected_sub['name']}"
+    state["subcategory"] = selected_sub["name"]
     save_user_state_db(user_id, state)
 
     msg = bot.send_message(
