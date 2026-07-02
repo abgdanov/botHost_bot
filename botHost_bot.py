@@ -355,6 +355,8 @@ def save_user_state_db(user_id, state_data):
 
 def get_user_state_db(user_id):
     global USER_STATES
+    if user_id in USER_STATES:
+        return USER_STATES[user_id]
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -486,10 +488,17 @@ def load_data_to_memory():
 def add_category_db(family_id, name, category_type, parent_id=None):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT 1 FROM categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS ?",
-            (family_id, name, category_type, parent_id),
-        )
+        # Исправлено: правильно обрабатываем parent_id = None
+        if parent_id is None:
+            cursor.execute(
+                "SELECT 1 FROM categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS NULL",
+                (family_id, name, category_type),
+            )
+        else:
+            cursor.execute(
+                "SELECT 1 FROM categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id = ?",
+                (family_id, name, category_type, parent_id),
+            )
         if cursor.fetchone():
             return False
         cursor.execute(
@@ -1229,10 +1238,13 @@ def handle_category_selection(message):
         delete_user_state_db(user_id)
         return
 
+    # Исправлено: ищем подкатегории ТОЛЬКО этой семьи
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM categories WHERE parent_id = ? AND (family_id = ? OR is_standard = 1)",
+            """SELECT * FROM categories 
+               WHERE parent_id = ? 
+               AND family_id = ?""",
             (category["id"], family_id),
         )
         subcategories = [dict(row) for row in cursor.fetchall()]
@@ -1308,6 +1320,28 @@ def handle_subcategory_selection(message):
     state = get_user_state_db(user_id)
     selected_subcategory = message.text
 
+    # Проверяем, не является ли это отменой или выбором "без подкатегории"
+    if selected_subcategory == "❌ Отмена":
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+        )
+        return
+
+    if selected_subcategory == "➡️ Без подкатегории":
+        state["category_id"] = state["selected_category_id"]
+        state["category_name"] = state["selected_category_name"]
+        state["subcategory"] = None
+        save_user_state_db(user_id, state)
+        msg = bot.send_message(
+            message.chat.id,
+            f"Вы выбрали: *{state['category_name']}*.\nВведите сумму цифрами:",
+            parse_mode="Markdown",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        bot.register_next_step_handler(msg, handle_amount)
+        return
+
     subcategories = state.get("subcategories", [])
     if selected_subcategory not in subcategories:
         bot.send_message(
@@ -1318,17 +1352,31 @@ def handle_subcategory_selection(message):
         delete_user_state_db(user_id)
         return
 
+    family_id = get_user_family_db(user_id)
+
+    # Исправлено: ищем подкатегорию сначала среди семейных
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id FROM categories WHERE name = ? AND (family_id = ? OR is_standard = 1) AND parent_id = ?",
-            (
-                selected_subcategory,
-                get_user_family_db(user_id),
-                state["selected_category_id"],
-            ),
+            """SELECT id FROM categories 
+               WHERE name = ? 
+               AND family_id = ? 
+               AND parent_id = ?""",
+            (selected_subcategory, family_id, state["selected_category_id"]),
         )
         result = cursor.fetchone()
+
+        # Если не нашли, пробуем поискать среди стандартных
+        if not result:
+            cursor.execute(
+                """SELECT id FROM categories 
+                   WHERE name = ? 
+                   AND is_standard = 1 
+                   AND parent_id = ?""",
+                (selected_subcategory, state["selected_category_id"]),
+            )
+            result = cursor.fetchone()
+
         if not result:
             bot.send_message(
                 message.chat.id,
@@ -1339,10 +1387,19 @@ def handle_subcategory_selection(message):
             return
         subcategory_id = result["id"]
 
+    # Получаем полное имя для отображения
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM categories WHERE id = ?", (state["selected_category_id"],)
+        )
+        parent_result = cursor.fetchone()
+        parent_name = (
+            parent_result["name"] if parent_result else state["selected_category_name"]
+        )
+
     state["category_id"] = subcategory_id
-    state["category_name"] = (
-        f"{state['selected_category_name']} → {selected_subcategory}"
-    )
+    state["category_name"] = f"{parent_name} → {selected_subcategory}"
     state["subcategory"] = selected_subcategory
     save_user_state_db(user_id, state)
 
