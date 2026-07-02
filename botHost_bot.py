@@ -1208,7 +1208,8 @@ def handle_category_selection(message):
     selected_label = message.text.strip()
 
     family_id = get_user_family_db(user_id)
-    trans_type = state["type"]
+
+    logging.info(f"🔍 Выбрана категория: {selected_label}")
 
     categories = state.get("categories", [])
     category = None
@@ -1233,6 +1234,7 @@ def handle_category_selection(message):
                 break
 
     if not category:
+        logging.error(f"❌ Категория не найдена: {selected_label}")
         bot.send_message(
             message.chat.id,
             "❌ Категория не найдена. Попробуйте еще раз.",
@@ -1241,16 +1243,25 @@ def handle_category_selection(message):
         delete_user_state_db(user_id)
         return
 
-    # Ищем подкатегории ТОЛЬКО этой семьи
+    logging.info(f"✅ Найдена категория: {category['name']} (id={category['id']})")
+
+    # Получаем подкатегории для этой категории
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """SELECT * FROM categories 
+            """SELECT id, name, type, family_id, parent_id, is_standard 
+               FROM categories 
                WHERE parent_id = ? 
                AND family_id = ?""",
             (category["id"], family_id),
         )
         subcategories = [dict(row) for row in cursor.fetchall()]
+
+    logging.info(f"📂 Найдено подкатегорий: {len(subcategories)}")
+    for sub in subcategories:
+        logging.info(
+            f"  - {sub['name']} (id={sub['id']}, parent_id={sub['parent_id']})"
+        )
 
     if subcategories:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -1259,12 +1270,16 @@ def handle_category_selection(message):
             markup.add(types.KeyboardButton(sub["name"]))
         markup.add(types.KeyboardButton("❌ Отмена"))
 
+        # СОХРАНЯЕМ ВСЁ в состоянии
         state["selected_category_id"] = category["id"]
         state["selected_category_name"] = category["name"]
-        state["subcategories"] = (
-            subcategories  # Сохраняем полные объекты, а не только имена
-        )
+        state["subcategories"] = subcategories  # Полные объекты
+        state["action"] = "add_transaction"
         save_user_state_db(user_id, state)
+
+        logging.info(
+            f"💾 Сохранено состояние: parent_id={category['id']}, подкатегорий={len(subcategories)}"
+        )
 
         bot.send_message(
             message.chat.id,
@@ -1272,9 +1287,11 @@ def handle_category_selection(message):
             reply_markup=markup,
         )
     else:
+        # Нет подкатегорий - сразу просим сумму
         state["category_id"] = category["id"]
         state["category_name"] = category["name"]
         state["subcategory"] = None
+        state["action"] = "add_transaction"
         save_user_state_db(user_id, state)
 
         msg = bot.send_message(
@@ -1305,6 +1322,7 @@ def handle_subcategory_or_cancel(message):
     state["category_id"] = state["selected_category_id"]
     state["category_name"] = state["selected_category_name"]
     state["subcategory"] = None
+    state["action"] = "add_transaction"
     save_user_state_db(user_id, state)
 
     msg = bot.send_message(
@@ -1325,7 +1343,11 @@ def handle_subcategory_selection(message):
     state = get_user_state_db(user_id)
     selected_subcategory = message.text
 
-    # Проверяем, не является ли это отменой или выбором "без подкатегории"
+    logging.info("=" * 50)
+    logging.info(f"🔍 Выбрана подкатегория: '{selected_subcategory}'")
+    logging.info(f"📦 Состояние: {state}")
+
+    # Проверяем отмену
     if selected_subcategory == "❌ Отмена":
         delete_user_state_db(user_id)
         bot.send_message(
@@ -1333,10 +1355,12 @@ def handle_subcategory_selection(message):
         )
         return
 
+    # Проверяем выбор "Без подкатегории"
     if selected_subcategory == "➡️ Без подкатегории":
         state["category_id"] = state["selected_category_id"]
         state["category_name"] = state["selected_category_name"]
         state["subcategory"] = None
+        state["action"] = "add_transaction"
         save_user_state_db(user_id, state)
         msg = bot.send_message(
             message.chat.id,
@@ -1347,10 +1371,13 @@ def handle_subcategory_selection(message):
         bot.register_next_step_handler(msg, handle_amount)
         return
 
-    # Получаем список подкатегорий из состояния (теперь это полные объекты)
+    # Получаем список подкатегорий из состояния
     subcategories = state.get("subcategories", [])
+    logging.info(f"📂 Доступно подкатегорий: {len(subcategories)}")
+    for sub in subcategories:
+        logging.info(f"  - '{sub['name']}' (id={sub['id']})")
 
-    # Ищем подкатегорию по точному совпадению имени
+    # Ищем подкатегорию по точному совпадению
     selected_sub = None
     for sub in subcategories:
         if sub["name"] == selected_subcategory:
@@ -1371,20 +1398,27 @@ def handle_subcategory_selection(message):
                 break
 
     if not selected_sub:
+        logging.error(f"❌ Подкатегория не найдена: {selected_subcategory}")
+        available = [sub["name"] for sub in subcategories]
+        logging.error(f"   Доступно: {available}")
         bot.send_message(
             message.chat.id,
-            "❌ Подкатегория не найдена. Пожалуйста, выберите из списка.",
+            f"❌ Подкатегория '{selected_subcategory}' не найдена. Пожалуйста, выберите из списка.",
             reply_markup=get_main_menu(),
         )
         delete_user_state_db(user_id)
         return
 
-    # Получаем имя родительской категории
-    parent_name = state["selected_category_name"]
+    logging.info(
+        f"✅ Найдена подкатегория: {selected_sub['name']} (id={selected_sub['id']})"
+    )
 
+    # Сохраняем выбранную подкатегорию
+    parent_name = state["selected_category_name"]
     state["category_id"] = selected_sub["id"]
     state["category_name"] = f"{parent_name} → {selected_sub['name']}"
     state["subcategory"] = selected_sub["name"]
+    state["action"] = "add_transaction"
     save_user_state_db(user_id, state)
 
     msg = bot.send_message(
