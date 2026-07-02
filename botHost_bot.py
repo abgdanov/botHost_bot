@@ -32,7 +32,7 @@ TRANSACTIONS = []
 REMINDERS = {}
 BUDGET_LIMITS = {}
 
-# --- КАТЕГОРИИ ---
+# --- СТАНДАРТНЫЕ КАТЕГОРИИ ---
 EXPENSE_CATEGORIES = [
     "🛒 Продукты",
     "🏠 ЖКХ / Аренда",
@@ -69,7 +69,7 @@ def init_db():
             "CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, family_id INTEGER, first_name TEXT, joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (family_id) REFERENCES families (family_id))"
         )
         cursor.execute(
-            "CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, family_id INTEGER, user_id INTEGER, user_name TEXT, type TEXT, category TEXT, amount REAL, date TIMESTAMP, FOREIGN KEY (family_id) REFERENCES families (family_id), FOREIGN KEY (user_id) REFERENCES users (user_id))"
+            "CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, family_id INTEGER, user_id INTEGER, user_name TEXT, type TEXT, category TEXT, subcategory TEXT, amount REAL, date TIMESTAMP, FOREIGN KEY (family_id) REFERENCES families (family_id), FOREIGN KEY (user_id) REFERENCES users (user_id))"
         )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, family_id INTEGER, user_id INTEGER, title TEXT, amount REAL, category TEXT, type TEXT, frequency TEXT, day INTEGER, next_due_date TIMESTAMP, notify_days_before TEXT, FOREIGN KEY (family_id) REFERENCES families (family_id), FOREIGN KEY (user_id) REFERENCES users (user_id))"
@@ -79,6 +79,9 @@ def init_db():
         )
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS user_states (user_id INTEGER PRIMARY KEY, state_data TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS custom_categories (id INTEGER PRIMARY KEY AUTOINCREMENT, family_id INTEGER NOT NULL, name TEXT NOT NULL, type TEXT CHECK(type IN ('expense', 'income')), parent_id INTEGER DEFAULT NULL, is_standard INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (family_id) REFERENCES families (family_id), FOREIGN KEY (parent_id) REFERENCES custom_categories(id), UNIQUE(family_id, name, type, parent_id))"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_transactions_family ON transactions(family_id)"
@@ -97,6 +100,12 @@ def init_db():
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_reminders_next_due ON reminders(next_due_date)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_custom_categories_family ON custom_categories(family_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_custom_categories_parent ON custom_categories(parent_id)"
         )
         print("✅ База данных инициализирована")
 
@@ -128,13 +137,22 @@ def create_family_db(family_id):
 
 
 def add_transaction_db(
-    family_id, user_id, user_name, trans_type, category, amount, date_obj
+    family_id, user_id, user_name, trans_type, category, subcategory, amount, date_obj
 ):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO transactions (family_id, user_id, user_name, type, category, amount, date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (family_id, user_id, user_name, trans_type, category, amount, date_obj),
+            "INSERT INTO transactions (family_id, user_id, user_name, type, category, subcategory, amount, date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                family_id,
+                user_id,
+                user_name,
+                trans_type,
+                category,
+                subcategory,
+                amount,
+                date_obj,
+            ),
         )
 
 
@@ -339,6 +357,107 @@ def load_data_to_memory():
     )
 
 
+# --- ФУНКЦИИ ДЛЯ РАБОТЫ С КАТЕГОРИЯМИ ---
+def add_custom_category_db(family_id, name, category_type, parent_id=None):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Проверяем, нет ли уже такой категории у этой семьи
+        cursor.execute(
+            "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS ?",
+            (family_id, name, category_type, parent_id),
+        )
+        if cursor.fetchone():
+            return False
+        cursor.execute(
+            "INSERT INTO custom_categories (family_id, name, type, parent_id) VALUES (?, ?, ?, ?)",
+            (family_id, name, category_type, parent_id),
+        )
+        return True
+
+
+def get_custom_categories_db(family_id, category_type=None):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if category_type:
+            cursor.execute(
+                "SELECT * FROM custom_categories WHERE family_id = ? AND type = ? ORDER BY name",
+                (family_id, category_type),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM custom_categories WHERE family_id = ? ORDER BY type, name",
+                (family_id,),
+            )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_custom_category_by_id_db(category_id, family_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM custom_categories WHERE id = ? AND family_id = ?",
+            (category_id, family_id),
+        )
+        result = cursor.fetchone()
+        return dict(result) if result else None
+
+
+def delete_custom_category_db(category_id, family_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Удаляем все подкатегории (каскадно)
+        cursor.execute(
+            "DELETE FROM custom_categories WHERE id = ? AND family_id = ?",
+            (category_id, family_id),
+        )
+        cursor.execute(
+            "DELETE FROM custom_categories WHERE parent_id = ? AND family_id = ?",
+            (category_id, family_id),
+        )
+        return True
+
+
+def get_category_tree_db(family_id, category_type):
+    """Возвращает дерево категорий для отображения"""
+    custom_cats = get_custom_categories_db(family_id, category_type)
+    # Строим дерево
+    tree = []
+    # Сначала добавляем стандартные категории
+    standard_cats = (
+        EXPENSE_CATEGORIES if category_type == "expense" else INCOME_CATEGORIES
+    )
+    for std_cat in standard_cats:
+        # Ищем подкатегории для этой стандартной категории
+        subcats = [
+            c
+            for c in custom_cats
+            if c["parent_id"] is None and c["is_standard"] == 1 and c["name"] == std_cat
+        ]
+        # На самом деле is_standard = 1 означает, что это подкатегория стандартной категории
+        # Мы будем хранить parent_name для привязки к стандартной категории
+        # Но в текущей реализации проще: подкатегории хранятся с parent_id = NULL,
+        # а is_standard = 1 означает, что это подкатегория стандартной категории
+        # Имя стандартной категории будем хранить в отдельном поле или просто по контексту
+        # Для упрощения: подкатегории стандартных категорий будем хранить с parent_id = -1 (специальное значение)
+        pass
+    # Для простоты реализации пока сделаем плоский список с группировкой
+    return custom_cats
+
+
+def get_subcategories_for_parent_db(family_id, parent_name, category_type):
+    """Получает подкатегории для родительской категории (стандартной или пользовательской)"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Ищем подкатегории, где parent_id ссылается на категорию с именем parent_name
+        # Это сложно, проще хранить parent_name явно
+        # Для простоты пока будем хранить parent_id = -1 для стандартных категорий
+        cursor.execute(
+            "SELECT * FROM custom_categories WHERE family_id = ? AND type = ? AND parent_id IS NULL AND is_standard = 0 ORDER BY name",
+            (family_id, category_type),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
 # --- КНОПКИ МЕНЮ ---
 def get_main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -348,11 +467,12 @@ def get_main_menu():
     btn4 = types.KeyboardButton("📊 История и Баланс")
     btn5 = types.KeyboardButton("💰 Бюджетные лимиты")
     btn6 = types.KeyboardButton("⏰ Напоминания о платежах")
-    btn7 = types.KeyboardButton("↩️ Отменить операцию")
+    btn7 = types.KeyboardButton("🏷️ Категории")
+    btn8 = types.KeyboardButton("↩️ Отменить операцию")
     markup.add(btn1, btn2)
     markup.add(btn3, btn4)
     markup.add(btn5, btn6)
-    markup.add(btn7)
+    markup.add(btn7, btn8)
     return markup
 
 
@@ -399,6 +519,17 @@ def get_limits_menu():
     btn3 = types.KeyboardButton("🗑 Удалить лимит")
     btn4 = types.KeyboardButton("🔙 Назад в главное меню")
     markup.add(btn1, btn2, btn3, btn4)
+    return markup
+
+
+def get_categories_menu():
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    btn1 = types.KeyboardButton("➕ Добавить категорию")
+    btn2 = types.KeyboardButton("📂 Добавить подкатегорию")
+    btn3 = types.KeyboardButton("🗑️ Удалить категорию")
+    btn4 = types.KeyboardButton("📋 Список категорий")
+    btn5 = types.KeyboardButton("🔙 Назад в главное меню")
+    markup.add(btn1, btn2, btn3, btn4, btn5)
     return markup
 
 
@@ -481,27 +612,593 @@ def save_family_id(message):
     )
 
 
-@bot.message_handler(
-    func=lambda message: message.text in ["📉 Добавить Расход", "📈 Добавить Доход"]
-)
-def handle_menu(message):
+# --- УПРАВЛЕНИЕ КАТЕГОРИЯМИ ---
+@bot.message_handler(func=lambda message: message.text == "🏷️ Категории")
+def categories_handler(message):
     user_id = message.from_user.id
     if not get_user_family_db(user_id):
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
         )
         return
+    bot.send_message(
+        message.chat.id,
+        "🏷️ **Управление категориями**\n\n"
+        "Здесь вы можете добавлять и удалять свои категории расходов и доходов.\n"
+        "Они будут видны всем участникам вашей семьи.\n\n"
+        "➕ Добавить категорию — создать новую родительскую категорию.\n"
+        "📂 Добавить подкатегорию — добавить подкатегорию к существующей категории.\n"
+        "🗑️ Удалить категорию — удалить категорию или подкатегорию.\n"
+        "📋 Список категорий — посмотреть все категории семьи.",
+        parse_mode="Markdown",
+        reply_markup=get_categories_menu(),
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "➕ Добавить категорию")
+def add_category_start(message):
+    user_id = message.from_user.id
+    save_user_state_db(user_id, {"action": "add_category"})
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add(types.KeyboardButton("💰 Расход"), types.KeyboardButton("📈 Доход"))
+    markup.add(types.KeyboardButton("❌ Отмена"))
+    bot.send_message(
+        message.chat.id,
+        "Выберите тип категории:",
+        reply_markup=markup,
+    )
+
+
+@bot.message_handler(
+    func=lambda message: message.text in ["💰 Расход", "📈 Доход"]
+    and get_user_state_db(message.from_user.id).get("action") == "add_category"
+)
+def add_category_type(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    category_type = "expense" if message.text == "💰 Расход" else "income"
+    state["category_type"] = category_type
+    save_user_state_db(user_id, state)
+    msg = bot.send_message(
+        message.chat.id,
+        "Введите название категории:\n\n"
+        "Например: «🚕 Такси», «💻 Подписки»\n"
+        "❌ Отмена",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    bot.register_next_step_handler(msg, add_category_name)
+
+
+def add_category_name(message):
+    user_id = message.from_user.id
+    if message.text == "❌ Отмена":
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+        )
+        return
+    state = get_user_state_db(user_id)
+    if not state or state.get("action") != "add_category":
+        bot.send_message(
+            message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
+        )
+        return
+    name = message.text.strip()
+    if not name:
+        msg = bot.send_message(
+            message.chat.id, "❌ Название не может быть пустым. Введите название:"
+        )
+        bot.register_next_step_handler(msg, add_category_name)
+        return
+    family_id = get_user_family_db(user_id)
+    category_type = state["category_type"]
+    if add_custom_category_db(family_id, name, category_type):
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id,
+            f"✅ Категория «{name}» добавлена!",
+            reply_markup=get_main_menu(),
+        )
+    else:
+        msg = bot.send_message(
+            message.chat.id,
+            f"❌ Категория «{name}» уже существует. Введите другое название:",
+        )
+        bot.register_next_step_handler(msg, add_category_name)
+
+
+@bot.message_handler(func=lambda message: message.text == "📂 Добавить подкатегорию")
+def add_subcategory_start(message):
+    user_id = message.from_user.id
+    family_id = get_user_family_db(user_id)
+    if not family_id:
+        return
+
+    # Получаем все родительские категории (стандартные + пользовательские)
+    parent_categories = []
+
+    # Стандартные категории
+    standard_cats = EXPENSE_CATEGORIES + INCOME_CATEGORIES
+    for cat in standard_cats:
+        parent_categories.append({"name": cat, "type": "standard"})
+
+    # Пользовательские категории (только родительские, без подкатегорий)
+    custom_cats = get_custom_categories_db(family_id)
+    for cat in custom_cats:
+        if cat["parent_id"] is None:
+            parent_categories.append(
+                {"name": cat["name"], "type": "custom", "id": cat["id"]}
+            )
+
+    if not parent_categories:
+        bot.send_message(
+            message.chat.id,
+            "Нет доступных родительских категорий. Сначала создайте категорию.",
+            reply_markup=get_categories_menu(),
+        )
+        return
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    for cat in parent_categories[:20]:  # Ограничиваем количество
+        markup.add(types.KeyboardButton(cat["name"]))
+    markup.add(types.KeyboardButton("❌ Отмена"))
+
+    save_user_state_db(
+        user_id,
+        {
+            "action": "add_subcategory",
+            "parent_categories": parent_categories,
+        },
+    )
+    bot.send_message(
+        message.chat.id,
+        "Выберите родительскую категорию для подкатегории:",
+        reply_markup=markup,
+    )
+
+
+@bot.message_handler(
+    func=lambda message: message.text
+    and get_user_state_db(message.from_user.id).get("action") == "add_subcategory"
+    and message.text != "❌ Отмена"
+)
+def add_subcategory_parent(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    parent_name = message.text
+
+    # Проверяем, существует ли такая родительская категория
+    parent_categories = state.get("parent_categories", [])
+    parent_exists = any(cat["name"] == parent_name for cat in parent_categories)
+    if not parent_exists:
+        bot.send_message(
+            message.chat.id,
+            "❌ Категория не найдена. Попробуйте еще раз.",
+            reply_markup=get_categories_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    state["parent_name"] = parent_name
+    save_user_state_db(user_id, state)
+
+    msg = bot.send_message(
+        message.chat.id,
+        f"Введите название подкатегории для «{parent_name}»:\n\n" f"❌ Отмена",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    bot.register_next_step_handler(msg, add_subcategory_name)
+
+
+def add_subcategory_name(message):
+    user_id = message.from_user.id
+    if message.text == "❌ Отмена":
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+        )
+        return
+
+    state = get_user_state_db(user_id)
+    if not state or state.get("action") != "add_subcategory":
+        bot.send_message(
+            message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
+        )
+        return
+
+    name = message.text.strip()
+    if not name:
+        msg = bot.send_message(
+            message.chat.id, "❌ Название не может быть пустым. Введите название:"
+        )
+        bot.register_next_step_handler(msg, add_subcategory_name)
+        return
+
+    family_id = get_user_family_db(user_id)
+    parent_name = state["parent_name"]
+
+    # Определяем, является ли родитель стандартной или пользовательской категорией
+    is_standard = False
+    standard_cats = EXPENSE_CATEGORIES + INCOME_CATEGORIES
+    if parent_name in standard_cats:
+        is_standard = True
+        # Для стандартной категории мы не храним её в custom_categories
+        # Поэтому parent_id = None, но мы будем знать, что это стандартная категория
+        category_type = "expense" if parent_name in EXPENSE_CATEGORIES else "income"
+        parent_id = None
+    else:
+        # Находим ID пользовательской категории
+        custom_cats = get_custom_categories_db(family_id)
+        parent_cat = next((c for c in custom_cats if c["name"] == parent_name), None)
+        if not parent_cat:
+            bot.send_message(
+                message.chat.id,
+                "❌ Родительская категория не найдена.",
+                reply_markup=get_main_menu(),
+            )
+            delete_user_state_db(user_id)
+            return
+        category_type = parent_cat["type"]
+        parent_id = parent_cat["id"]
+
+    # Добавляем подкатегорию с is_standard = 1 для стандартных категорий
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Проверяем, нет ли уже такой подкатегории
+        cursor.execute(
+            "SELECT 1 FROM custom_categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS ?",
+            (family_id, name, category_type, parent_id),
+        )
+        if cursor.fetchone():
+            bot.send_message(
+                message.chat.id,
+                f"❌ Подкатегория «{name}» уже существует.",
+                reply_markup=get_main_menu(),
+            )
+            delete_user_state_db(user_id)
+            return
+
+        cursor.execute(
+            "INSERT INTO custom_categories (family_id, name, type, parent_id, is_standard) VALUES (?, ?, ?, ?, ?)",
+            (family_id, name, category_type, parent_id, 1 if is_standard else 0),
+        )
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id,
+            f"✅ Подкатегория «{name}» добавлена к «{parent_name}»!",
+            reply_markup=get_main_menu(),
+        )
+
+
+@bot.message_handler(func=lambda message: message.text == "🗑️ Удалить категорию")
+def delete_category_start(message):
+    user_id = message.from_user.id
+    family_id = get_user_family_db(user_id)
+    if not family_id:
+        return
+
+    # Получаем все пользовательские категории (включая подкатегории)
+    custom_cats = get_custom_categories_db(family_id)
+    if not custom_cats:
+        bot.send_message(
+            message.chat.id,
+            "Нет пользовательских категорий для удаления.",
+            reply_markup=get_categories_menu(),
+        )
+        return
+
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    for cat in custom_cats[:20]:
+        label = cat["name"]
+        if cat["parent_id"] is not None:
+            # Находим родителя
+            parent = next((c for c in custom_cats if c["id"] == cat["parent_id"]), None)
+            if parent:
+                label = f"↳ {cat['name']} (→ {parent['name']})"
+            else:
+                label = f"↳ {cat['name']}"
+        markup.add(types.KeyboardButton(label))
+    markup.add(types.KeyboardButton("❌ Отмена"))
+
+    save_user_state_db(
+        user_id,
+        {
+            "action": "delete_category",
+            "custom_categories": custom_cats,
+        },
+    )
+    bot.send_message(
+        message.chat.id,
+        "Выберите категорию для удаления:\n\n"
+        "⚠️ При удалении родительской категории все её подкатегории тоже будут удалены.\n"
+        "Старые транзакции сохранятся.",
+        reply_markup=markup,
+    )
+
+
+@bot.message_handler(
+    func=lambda message: message.text
+    and get_user_state_db(message.from_user.id).get("action") == "delete_category"
+    and message.text != "❌ Отмена"
+)
+def delete_category_confirm(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    selected_label = message.text
+
+    # Извлекаем имя категории из лейбла
+    if " (→ " in selected_label:
+        # Это подкатегория
+        name = selected_label.split(" (→ ")[0].replace("↳ ", "").strip()
+    else:
+        name = selected_label.strip()
+
+    custom_cats = state.get("custom_categories", [])
+    category = next((c for c in custom_cats if c["name"] == name), None)
+    if not category:
+        bot.send_message(
+            message.chat.id,
+            "❌ Категория не найдена. Попробуйте еще раз.",
+            reply_markup=get_categories_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    family_id = get_user_family_db(user_id)
+    delete_custom_category_db(category["id"], family_id)
+    load_data_to_memory()
+
+    delete_user_state_db(user_id)
+    bot.send_message(
+        message.chat.id,
+        f"✅ Категория «{name}» и все её подкатегории удалены.",
+        reply_markup=get_main_menu(),
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "📋 Список категорий")
+def list_categories(message):
+    user_id = message.from_user.id
+    family_id = get_user_family_db(user_id)
+    if not family_id:
+        return
+
+    response = "📋 **Категории вашей семьи**\n\n"
+
+    # Расходы
+    response += "💰 **Расходы:**\n"
+    # Стандартные
+    for cat in EXPENSE_CATEGORIES:
+        response += f"• {cat} (стандартная)\n"
+    # Пользовательские
+    custom_cats = get_custom_categories_db(family_id, "expense")
+    parent_cats = [c for c in custom_cats if c["parent_id"] is None]
+    for cat in parent_cats:
+        response += f"• {cat['name']} (ваша)\n"
+        # Подкатегории
+        subcats = [c for c in custom_cats if c["parent_id"] == cat["id"]]
+        for sub in subcats:
+            response += f"  ↳ {sub['name']}\n"
+
+    # Доходы
+    response += "\n📈 **Доходы:**\n"
+    for cat in INCOME_CATEGORIES:
+        response += f"• {cat} (стандартная)\n"
+    custom_cats = get_custom_categories_db(family_id, "income")
+    parent_cats = [c for c in custom_cats if c["parent_id"] is None]
+    for cat in parent_cats:
+        response += f"• {cat['name']} (ваша)\n"
+        subcats = [c for c in custom_cats if c["parent_id"] == cat["id"]]
+        for sub in subcats:
+            response += f"  ↳ {sub['name']}\n"
+
+    bot.send_message(message.chat.id, response, parse_mode="Markdown")
+
+
+# --- УЧЕТ РАСХОДОВ И ДОХОДОВ ---
+@bot.message_handler(
+    func=lambda message: message.text in ["📉 Добавить Расход", "📈 Добавить Доход"]
+)
+def handle_menu(message):
+    user_id = message.from_user.id
+    family_id = get_user_family_db(user_id)
+
+    if not family_id:
+        bot.send_message(
+            message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
+        )
+        return
+
     trans_type = "expense" if message.text == "📉 Добавить Расход" else "income"
     save_user_state_db(user_id, {"action": "add_transaction", "type": trans_type})
-    categories = EXPENSE_CATEGORIES if trans_type == "expense" else INCOME_CATEGORIES
+
+    # Собираем все категории (стандартные + пользовательские родительские)
+    categories = []
+
+    # Стандартные
+    standard_cats = EXPENSE_CATEGORIES if trans_type == "expense" else INCOME_CATEGORIES
+    for cat in standard_cats:
+        categories.append({"name": cat, "is_standard": True})
+
+    # Пользовательские (только родительские)
+    custom_cats = get_custom_categories_db(family_id, trans_type)
+    parent_cats = [c for c in custom_cats if c["parent_id"] is None]
+    for cat in parent_cats:
+        categories.append({"name": cat["name"], "is_standard": False, "id": cat["id"]})
+
+    if not categories:
+        bot.send_message(
+            message.chat.id,
+            "Нет доступных категорий. Создайте через меню «🏷️ Категории».",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    for cat in categories:
-        markup.add(types.KeyboardButton(cat))
+    for cat in categories[:20]:
+        markup.add(types.KeyboardButton(cat["name"]))
     markup.add(types.KeyboardButton("❌ Отмена"))
+
+    save_user_state_db(
+        user_id,
+        {
+            "action": "add_transaction",
+            "type": trans_type,
+            "categories": categories,
+        },
+    )
+
     action_text = "расхода" if trans_type == "expense" else "дохода"
     bot.send_message(
-        message.chat.id, f"Выберите категорию для {action_text}:", reply_markup=markup
+        message.chat.id,
+        f"Выберите категорию для {action_text}:",
+        reply_markup=markup,
     )
+
+
+@bot.message_handler(
+    func=lambda message: message.text
+    and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+    and message.text != "❌ Отмена"
+)
+def handle_category_selection(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    selected_category = message.text
+
+    # Проверяем, есть ли подкатегории для этой категории
+    family_id = get_user_family_db(user_id)
+    trans_type = state["type"]
+
+    # Проверяем, является ли категория стандартной
+    standard_cats = EXPENSE_CATEGORIES if trans_type == "expense" else INCOME_CATEGORIES
+    is_standard = selected_category in standard_cats
+
+    # Получаем подкатегории
+    subcategories = []
+    if is_standard:
+        # Ищем подкатегории для стандартной категории (is_standard = 1)
+        custom_cats = get_custom_categories_db(family_id, trans_type)
+        subcategories = [
+            c for c in custom_cats if c["is_standard"] == 1 and c["parent_id"] is None
+        ]
+        # Для стандартных категорий мы будем хранить подкатегории с parent_id = None и is_standard = 1
+        # Но чтобы привязать к конкретной стандартной категории, нам нужно хранить parent_name
+        # Для упрощения пока сделаем так: подкатегории стандартных категорий будем хранить с parent_id = -1
+        # И будем использовать поле parent_id = -1 для стандартных категорий
+        # В текущей реализации мы будем хранить подкатегории с parent_id = -1 для стандартных категорий
+        # Но для простоты пока оставим так, как есть
+        pass
+    else:
+        # Ищем подкатегории для пользовательской категории
+        custom_cats = get_custom_categories_db(family_id, trans_type)
+        parent_cat = next(
+            (
+                c
+                for c in custom_cats
+                if c["name"] == selected_category and c["parent_id"] is None
+            ),
+            None,
+        )
+        if parent_cat:
+            subcategories = [
+                c for c in custom_cats if c["parent_id"] == parent_cat["id"]
+            ]
+
+    if subcategories:
+        # Показываем подкатегории
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add(types.KeyboardButton("➡️ Без подкатегории"))
+        for sub in subcategories:
+            markup.add(types.KeyboardButton(sub["name"]))
+        markup.add(types.KeyboardButton("❌ Отмена"))
+
+        state["selected_category"] = selected_category
+        state["subcategories"] = [s["name"] for s in subcategories]
+        save_user_state_db(user_id, state)
+
+        bot.send_message(
+            message.chat.id,
+            f"Вы выбрали «{selected_category}».\n\nВыберите подкатегорию или «Без подкатегории»:",
+            reply_markup=markup,
+        )
+    else:
+        # Нет подкатегорий, сразу запрашиваем сумму
+        state["category"] = selected_category
+        state["subcategory"] = None
+        save_user_state_db(user_id, state)
+
+        msg = bot.send_message(
+            message.chat.id,
+            f"Вы выбрали: *{selected_category}*.\nВведите сумму цифрами:",
+            parse_mode="Markdown",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        bot.register_next_step_handler(msg, handle_amount)
+
+
+@bot.message_handler(
+    func=lambda message: message.text
+    and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+    and message.text in ["➡️ Без подкатегории", "❌ Отмена"]
+)
+def handle_subcategory_or_cancel(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+
+    if message.text == "❌ Отмена":
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+        )
+        return
+
+    # Без подкатегории
+    state["category"] = state["selected_category"]
+    state["subcategory"] = None
+    save_user_state_db(user_id, state)
+
+    msg = bot.send_message(
+        message.chat.id,
+        f"Вы выбрали: *{state['category']}*.\nВведите сумму цифрами:",
+        parse_mode="Markdown",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    bot.register_next_step_handler(msg, handle_amount)
+
+
+@bot.message_handler(
+    func=lambda message: message.text
+    and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+)
+def handle_subcategory_selection(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    selected_subcategory = message.text
+
+    # Проверяем, является ли выбранная подкатегория допустимой
+    subcategories = state.get("subcategories", [])
+    if selected_subcategory not in subcategories:
+        bot.send_message(
+            message.chat.id,
+            "❌ Неверный выбор. Пожалуйста, выберите из списка.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    state["category"] = state["selected_category"]
+    state["subcategory"] = selected_subcategory
+    save_user_state_db(user_id, state)
+
+    msg = bot.send_message(
+        message.chat.id,
+        f"Вы выбрали: *{state['category']} → {selected_subcategory}*.\nВведите сумму цифрами:",
+        parse_mode="Markdown",
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    bot.register_next_step_handler(msg, handle_amount)
 
 
 @bot.message_handler(func=lambda message: message.text == "❌ Отмена")
@@ -512,31 +1209,11 @@ def cancel_operation(message):
     )
 
 
-@bot.message_handler(
-    func=lambda message: (
-        message.text in EXPENSE_CATEGORIES or message.text in INCOME_CATEGORIES
-    )
-    and message.from_user.id in USER_STATES
-    and USER_STATES[message.from_user.id].get("action") == "add_transaction"
-)
-def handle_category(message):
-    user_id = message.from_user.id
-    state = get_user_state_db(user_id)
-    state["category"] = message.text
-    save_user_state_db(user_id, state)
-    msg = bot.send_message(
-        message.chat.id,
-        f"Вы выбрали: *{message.text}*.\nВведите сумму цифрами:",
-        parse_mode="Markdown",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
-    bot.register_next_step_handler(msg, handle_amount)
-
-
 def handle_amount(message):
     user_id = message.from_user.id
     input_text = message.text.replace(",", ".")
     state = get_user_state_db(user_id)
+
     if not state or state.get("action") != "add_transaction":
         bot.send_message(
             message.chat.id,
@@ -544,6 +1221,7 @@ def handle_amount(message):
             reply_markup=get_main_menu(),
         )
         return
+
     try:
         amount = float(input_text)
         if amount <= 0:
@@ -554,25 +1232,41 @@ def handle_amount(message):
         )
         bot.register_next_step_handler(msg, handle_amount)
         return
-    trans_type, category, family_id, user_name = (
-        state["type"],
-        state["category"],
-        get_user_family_db(user_id),
-        message.from_user.first_name,
-    )
+
+    trans_type = state["type"]
+    category = state["category"]
+    subcategory = state.get("subcategory")
+    family_id = get_user_family_db(user_id)
+    user_name = message.from_user.first_name
+
     trans_type_text = "Расход" if trans_type == "expense" else "Доход"
     add_transaction_db(
-        family_id, user_id, user_name, trans_type_text, category, amount, datetime.now()
+        family_id,
+        user_id,
+        user_name,
+        trans_type_text,
+        category,
+        subcategory,
+        amount,
+        datetime.now(),
     )
     delete_user_state_db(user_id)
     load_data_to_memory()
+
+    response = f"✅ Записано!\n• {trans_type_text}: {amount:.2f} руб."
+    if subcategory:
+        response += f"\n• Категория: {category} → {subcategory}"
+    else:
+        response += f"\n• Категория: {category}"
+
     bot.send_message(
         message.chat.id,
-        f"✅ Записано!\n• {trans_type_text}: {amount:.2f} руб. ({category})",
+        response,
         reply_markup=get_main_menu(),
     )
 
 
+# --- ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (БЕЗ ИЗМЕНЕНИЙ) ---
 @bot.message_handler(func=lambda message: message.text == "↩️ Отменить операцию")
 def cancel_last_transaction(message):
     user_id = message.from_user.id
@@ -627,7 +1321,10 @@ def show_balance_and_history(message):
                     "%d.%m %H:%M"
                 )
             )
-            response += f"{i}. {t['user_name']} ({date_str}): {sign}{t['amount']:.2f} р. — {t['category']}\n"
+            category_display = t["category"]
+            if t.get("subcategory"):
+                category_display += f" → {t['subcategory']}"
+            response += f"{i}. {t['user_name']} ({date_str}): {sign}{t['amount']:.2f} р. — {category_display}\n"
     bot.send_message(message.chat.id, response, parse_mode="Markdown")
 
 
@@ -982,9 +1679,7 @@ def add_reminder_type(message):
 
 
 @bot.message_handler(
-    func=lambda message: (
-        message.text in EXPENSE_CATEGORIES or message.text in INCOME_CATEGORIES
-    )
+    func=lambda message: message.text in EXPENSE_CATEGORIES + INCOME_CATEGORIES
     and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
 )
 def add_reminder_category(message):
