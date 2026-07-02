@@ -486,7 +486,6 @@ def load_data_to_memory():
 def add_category_db(family_id, name, category_type, parent_id=None):
     with get_db() as conn:
         cursor = conn.cursor()
-        # Проверяем, существует ли уже такая категория
         cursor.execute(
             "SELECT 1 FROM categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS ?",
             (family_id, name, category_type, parent_id),
@@ -529,7 +528,6 @@ def get_category_by_id(category_id):
 def delete_category_db(category_id, family_id):
     with get_db() as conn:
         cursor = conn.cursor()
-        # Проверяем, есть ли транзакции с этой категорией
         cursor.execute(
             "SELECT COUNT(*) as count FROM transactions WHERE category_id = ?",
             (category_id,),
@@ -537,7 +535,6 @@ def delete_category_db(category_id, family_id):
         result = cursor.fetchone()
         has_transactions = result["count"] > 0
 
-        # Проверяем, есть ли подкатегории
         cursor.execute(
             "SELECT COUNT(*) as count FROM categories WHERE parent_id = ?",
             (category_id,),
@@ -545,16 +542,13 @@ def delete_category_db(category_id, family_id):
         result = cursor.fetchone()
         has_subcategories = result["count"] > 0
 
-        # Удаляем лимиты
         delete_budget_limits_by_category_db(category_id)
 
-        # Удаляем подкатегории
         cursor.execute(
             "DELETE FROM categories WHERE parent_id = ? AND family_id = ?",
             (category_id, family_id),
         )
 
-        # Удаляем саму категорию
         cursor.execute(
             "DELETE FROM categories WHERE id = ? AND family_id = ?",
             (category_id, family_id),
@@ -825,7 +819,6 @@ def add_subcategory_start(message):
     if not family_id:
         return
 
-    # Получаем все родительские категории (стандартные + пользовательские)
     parent_categories = get_categories_db(family_id)
 
     if not parent_categories:
@@ -838,10 +831,7 @@ def add_subcategory_start(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for cat in parent_categories[:20]:
-        label = cat["name"]
-        if cat["is_standard"]:
-            label += " (стандартная)"
-        markup.add(types.KeyboardButton(label))
+        markup.add(types.KeyboardButton(cat["name"]))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
     save_user_state_db(
@@ -866,9 +856,8 @@ def add_subcategory_start(message):
 def add_subcategory_parent(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-    parent_name = message.text.replace(" (стандартная)", "").strip()
+    parent_name = message.text.strip()
 
-    # Проверяем, существует ли такая родительская категория
     parent_categories = state.get("parent_categories", [])
     parent_cat = next((c for c in parent_categories if c["name"] == parent_name), None)
     if not parent_cat:
@@ -882,12 +871,12 @@ def add_subcategory_parent(message):
 
     state["parent_id"] = parent_cat["id"]
     state["parent_name"] = parent_name
-    state["category_type"] = parent_cat["type"]  # Сохраняем тип категории
+    state["category_type"] = parent_cat["type"]
     save_user_state_db(user_id, state)
 
     msg = bot.send_message(
         message.chat.id,
-        f"Введите название подкатегории для «{parent_name}»:\n\n" f"❌ Отмена",
+        f"Введите название подкатегории для «{parent_name}»:",
         reply_markup=types.ReplyKeyboardRemove(),
     )
     bot.register_next_step_handler(msg, add_subcategory_name)
@@ -919,9 +908,8 @@ def add_subcategory_name(message):
 
     family_id = get_user_family_db(user_id)
     parent_id = state["parent_id"]
-    category_type = state.get("category_type")  # Берём тип от родителя
+    category_type = state.get("category_type")
 
-    # Добавляем подкатегорию с типом родителя
     if add_category_db(family_id, name, category_type, parent_id):
         delete_user_state_db(user_id)
         bot.send_message(
@@ -944,7 +932,6 @@ def delete_category_start(message):
     if not family_id:
         return
 
-    # Получаем все пользовательские категории (включая подкатегории)
     user_categories = get_categories_db(family_id)
 
     if not user_categories:
@@ -958,7 +945,6 @@ def delete_category_start(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for cat in user_categories[:20]:
         label = cat["name"]
-        # Проверяем, есть ли подкатегории
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1008,7 +994,6 @@ def delete_category_confirm(message):
         delete_user_state_db(user_id)
         return
 
-    # Проверяем, есть ли транзакции с этой категорией
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1021,7 +1006,6 @@ def delete_category_confirm(message):
     family_id = get_user_family_db(user_id)
     has_subcategories = False
 
-    # Проверяем, есть ли подкатегории
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1116,7 +1100,6 @@ def list_categories(message):
 
     response = "📋 **Категории вашей семьи**\n\n"
 
-    # Расходы
     response += "💰 **Расходы:**\n"
     expense_cats = get_categories_db(family_id, "expense")
     for cat in expense_cats:
@@ -1124,7 +1107,6 @@ def list_categories(message):
             response += f"• {cat['name']} (стандартная)\n"
         else:
             response += f"• {cat['name']} (ваша)\n"
-        # Подкатегории
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1135,7 +1117,6 @@ def list_categories(message):
             for sub in subcats:
                 response += f"  ↳ {sub['name']}\n"
 
-    # Доходы
     response += "\n📈 **Доходы:**\n"
     income_cats = get_categories_db(family_id, "income")
     for cat in income_cats:
@@ -1143,7 +1124,6 @@ def list_categories(message):
             response += f"• {cat['name']} (стандартная)\n"
         else:
             response += f"• {cat['name']} (ваша)\n"
-        # Подкатегории
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1174,7 +1154,6 @@ def handle_menu(message):
     trans_type = "expense" if message.text == "📉 Добавить Расход" else "income"
     save_user_state_db(user_id, {"action": "add_transaction", "type": trans_type})
 
-    # Собираем все родительские категории (стандартные + пользовательские)
     categories = get_categories_db(family_id, trans_type)
 
     if not categories:
@@ -1188,10 +1167,7 @@ def handle_menu(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for cat in categories[:20]:
-        label = cat["name"]
-        if cat["is_standard"]:
-            label += " (стандартная)"
-        markup.add(types.KeyboardButton(label))
+        markup.add(types.KeyboardButton(cat["name"]))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
     save_user_state_db(
@@ -1219,22 +1195,19 @@ def handle_menu(message):
 def handle_category_selection(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-    selected_label = message.text.replace(" (стандартная)", "").strip()
+    selected_label = message.text.strip()
 
     family_id = get_user_family_db(user_id)
     trans_type = state["type"]
 
-    # Получаем категорию по имени (с учётом эмодзи)
     categories = state.get("categories", [])
     category = None
 
-    # 1. Прямое совпадение
     for c in categories:
         if c["name"] == selected_label:
             category = c
             break
 
-    # 2. Если не нашли — пробуем по очищенному имени
     if not category:
         clean_label = "".join(
             ch for ch in selected_label if ch.isalnum() or ch.isspace()
@@ -1256,7 +1229,6 @@ def handle_category_selection(message):
         delete_user_state_db(user_id)
         return
 
-    # Проверяем, есть ли подкатегории
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1313,7 +1285,6 @@ def handle_subcategory_or_cancel(message):
         )
         return
 
-    # Без подкатегории
     state["category_id"] = state["selected_category_id"]
     state["category_name"] = state["selected_category_name"]
     state["subcategory"] = None
@@ -1337,7 +1308,6 @@ def handle_subcategory_selection(message):
     state = get_user_state_db(user_id)
     selected_subcategory = message.text
 
-    # Проверяем, является ли выбранная подкатегория допустимой
     subcategories = state.get("subcategories", [])
     if selected_subcategory not in subcategories:
         bot.send_message(
@@ -1348,7 +1318,6 @@ def handle_subcategory_selection(message):
         delete_user_state_db(user_id)
         return
 
-    # Получаем ID подкатегории
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1439,7 +1408,6 @@ def handle_amount(message):
 
     response = f"✅ Записано!\n• {trans_type_text}: {amount:.2f} руб.\n• Категория: {category_name}"
 
-    # Проверка лимитов
     if trans_type == "expense":
         limits = get_budget_limits_db(family_id)
         if category_id in limits:
@@ -1494,7 +1462,6 @@ def cancel_last_transaction(message):
         )
         return
 
-    # Сохраняем информацию о последней операции
     save_user_state_db(
         user_id,
         {
@@ -1530,7 +1497,6 @@ def handle_cancel_confirmation(message):
         )
         return
 
-    # Удаляем операцию
     transaction_id = state["transaction_id"]
     delete_transaction_db(transaction_id)
     load_data_to_memory()
@@ -1571,24 +1537,20 @@ def show_balance_and_history(message):
     start_of_month = datetime(now.year, now.month, 1)
     seven_days_ago = now - timedelta(days=7)
 
-    # Получаем транзакции за последние 7 дней
     transactions = get_transactions_db(
         family_id, start_date=seven_days_ago, end_date=now
     )
 
-    # Получаем транзакции с начала месяца для статистики
     month_transactions = get_transactions_db(
         family_id, start_date=start_of_month, end_date=now
     )
 
-    # Общая статистика
     total_income = sum(t["amount"] for t in month_transactions if t["type"] == "Доход")
     total_expense = sum(
         t["amount"] for t in month_transactions if t["type"] == "Расход"
     )
     balance = total_income - total_expense
 
-    # Статистика с начала месяца
     days_in_month = (now - start_of_month).days + 1
     avg_spent_per_day = total_expense / days_in_month if days_in_month > 0 else 0
 
@@ -1596,7 +1558,6 @@ def show_balance_and_history(message):
     response += f"   📥 Доходы: {total_income:.2f} руб.\n"
     response += f"   📤 Расходы: {total_expense:.2f} руб.\n\n"
 
-    # Статистика с начала месяца
     response += f"📊 **СТАТИСТИКА С НАЧАЛА МЕСЯЦА:**\n"
     response += f"   📥 Доходы: {total_income:.2f} руб.\n"
     response += f"   📤 Расходы: {total_expense:.2f} руб.\n"
@@ -1604,13 +1565,11 @@ def show_balance_and_history(message):
     response += f"   📅 Дней: {days_in_month}\n"
     response += f"   📈 Средние траты в день: {avg_spent_per_day:.2f} руб.\n\n"
 
-    # История операций за 7 дней
     if not transactions:
         response += "📋 **За последние 7 дней операций не было.**"
     else:
         response += "📋 **ПОСЛЕДНИЕ 7 ДНЕЙ:**\n\n"
 
-        # Группировка по дням
         current_date = None
         for t in transactions:
             t_date = (
@@ -1620,7 +1579,6 @@ def show_balance_and_history(message):
             )
             if current_date != t_date:
                 current_date = t_date
-                # Определяем подпись дня
                 if current_date == now.date():
                     day_label = "Сегодня"
                 elif current_date == (now - timedelta(days=1)).date():
@@ -1776,7 +1734,6 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
     family_id = get_user_family_db(user_id)
     days_in_period = (end_date - start_date).days + 1
 
-    # Получаем транзакции
     if report_type == "family":
         transactions = get_transactions_db(
             family_id, start_date=start_date, end_date=end_date
@@ -1797,32 +1754,26 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
         )
         return
 
-    # Основные показатели
     total_income = sum(t["amount"] for t in transactions if t["type"] == "Доход")
     total_expense = sum(t["amount"] for t in transactions if t["type"] == "Расход")
     balance = total_income - total_expense
 
-    # Формируем отчет
     response = f"**{title}**\n"
     response += f"📅 {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')} ({days_in_period} дн.)\n\n"
 
-    # Баланс
     response += f"💰 **БАЛАНС:** {balance:+.2f} руб.\n"
     response += f"   📥 Доходы: {total_income:.2f} руб.\n"
     response += f"   📤 Расходы: {total_expense:.2f} руб.\n\n"
 
-    # Средние траты
     avg_spent = total_expense / days_in_period if days_in_period > 0 else 0
     avg_income = total_income / days_in_period if days_in_period > 0 else 0
     response += f"📊 Средние траты в день: {avg_spent:.2f} руб.\n"
     response += f"📈 Средние доходы в день: {avg_income:.2f} руб.\n\n"
 
-    # Расходы по категориям с иерархией
     if total_expense > 0:
         response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         response += "📊 **РАСХОДЫ ПО КАТЕГОРИЯМ:**\n\n"
 
-        # Группируем по категориям
         expense_by_category = {}
         for t in transactions:
             if t["type"] == "Расход":
@@ -1831,21 +1782,18 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
                     expense_by_category[cat_name] = 0
                 expense_by_category[cat_name] += t["amount"]
 
-        # Сортируем по убыванию
         sorted_cats = sorted(
             expense_by_category.items(), key=lambda x: x[1], reverse=True
         )
 
         for cat_name, amount in sorted_cats:
             percentage = (amount / total_expense) * 100
-            # Прогресс-бар
             bar_length = int((amount / sorted_cats[0][1]) * 20) if sorted_cats else 0
             bar = "█" * bar_length + "░" * (20 - bar_length)
 
             response += f"{get_category_emoji(cat_name)} {cat_name}: {amount:.2f} руб. ({percentage:.1f}%)\n"
             response += f"   `{bar}`\n"
 
-    # Сравнение с предыдущим периодом (если есть данные)
     previous_end = start_date - timedelta(days=1)
     previous_start = previous_end - timedelta(days=days_in_period - 1)
 
@@ -1870,17 +1818,14 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
         response += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         response += "📈 **СРАВНЕНИЕ С ПРЕДЫДУЩИМ ПЕРИОДОМ:**\n\n"
 
-        # Доходы
         if prev_income > 0:
             change = ((total_income - prev_income) / prev_income) * 100
             arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
             response += f"📥 Доходы: {total_income:.2f} → {prev_income:.2f} ({change:+.1f}%) {arrow}\n"
-        # Расходы
         if prev_expense > 0:
             change = ((total_expense - prev_expense) / prev_expense) * 100
             arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
             response += f"📤 Расходы: {total_expense:.2f} → {prev_expense:.2f} ({change:+.1f}%) {arrow}\n"
-        # Баланс
         if prev_balance != 0:
             change = (
                 ((balance - prev_balance) / abs(prev_balance)) * 100
@@ -1890,7 +1835,6 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
             arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
             response += f"💰 Остаток: {balance:.2f} → {prev_balance:.2f} ({change:+.1f}%) {arrow}\n"
 
-    # Топ-5 трат
     expenses = [t for t in transactions if t["type"] == "Расход"]
     if expenses:
         expenses.sort(key=lambda x: x["amount"], reverse=True)
@@ -1937,7 +1881,6 @@ def set_limit_category(message):
     if not family_id:
         return
 
-    # Получаем все категории (расходы)
     categories = get_categories_db(family_id, "expense")
     if not categories:
         bot.send_message(
@@ -1949,10 +1892,7 @@ def set_limit_category(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for cat in categories:
-        label = cat["name"]
-        if cat["is_standard"]:
-            label += " (стандартная)"
-        markup.add(types.KeyboardButton(label))
+        markup.add(types.KeyboardButton(cat["name"]))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
     save_user_state_db(user_id, {"action": "set_limit", "categories": categories})
@@ -1969,7 +1909,7 @@ def set_limit_category(message):
 def set_limit_amount(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-    selected_category = message.text.replace(" (стандартная)", "").strip()
+    selected_category = message.text.strip()
 
     categories = state.get("categories", [])
     category = None
@@ -1979,7 +1919,6 @@ def set_limit_amount(message):
             break
 
     if not category:
-        # Пробуем по очищенному имени
         clean_sel = "".join(
             ch for ch in selected_category if ch.isalnum() or ch.isspace()
         ).strip()
@@ -2080,7 +2019,6 @@ def view_limits(message):
     for category_id, data in limits.items():
         category_name = data["name"]
         limit = data["limit"]
-        # Получаем текущие расходы по этой категории за месяц
         now = datetime.now()
         start_date = datetime(now.year, now.month, 1)
         if now.month == 12:
@@ -2098,7 +2036,6 @@ def view_limits(message):
         )
         percentage = (current_expense / limit) * 100 if limit > 0 else 0
 
-        # Статус
         if percentage >= 100:
             status = "🔴 **ПРЕВЫШЕН**"
         elif percentage >= 80:
@@ -2232,7 +2169,6 @@ def add_reminder_type(message):
     state["reminder_type"] = trans_type
     save_user_state_db(user_id, state)
 
-    # Показываем категории
     categories = get_categories_db(get_user_family_db(user_id), trans_type)
     if not categories:
         bot.send_message(
@@ -2245,10 +2181,7 @@ def add_reminder_type(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for cat in categories:
-        label = cat["name"]
-        if cat["is_standard"]:
-            label += " (стандартная)"
-        markup.add(types.KeyboardButton(label))
+        markup.add(types.KeyboardButton(cat["name"]))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
     save_user_state_db(
@@ -2267,7 +2200,7 @@ def add_reminder_type(message):
 def add_reminder_category(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-    selected_category = message.text.replace(" (стандартная)", "").strip()
+    selected_category = message.text.strip()
 
     categories = state.get("categories", [])
     category = None
@@ -2640,7 +2573,6 @@ if __name__ == "__main__":
     init_db()
     load_data_to_memory()
 
-    # Удаляем webhook на случай, если был активен
     try:
         bot.delete_webhook()
         print("✅ Webhook удалён (если был)")
@@ -2651,11 +2583,9 @@ if __name__ == "__main__":
     print("💰 Семейный бюджет бот активен")
     print(f"💾 Данные сохраняются в {DB_NAME}")
 
-    # Запускаем проверку напоминаний в фоне
     run_reminder_checker()
     print("✅ Планировщик напоминаний запущен")
 
-    # Запускаем бота
     try:
         bot.infinity_polling()
     except KeyboardInterrupt:
