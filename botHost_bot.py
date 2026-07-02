@@ -1546,6 +1546,16 @@ def cancel_last_transaction(message):
         )
         return
 
+    # Проверяем, есть ли состояние отмены
+    state = get_user_state_db(user_id)
+    if state.get("action") == "confirm_cancel":
+        bot.send_message(
+            message.chat.id,
+            "⚠️ Вы уже в процессе отмены. Выберите «❌ Удалить» или «🔙 Отмена».",
+            reply_markup=get_cancel_confirmation_menu(),
+        )
+        return
+
     last_trans = get_last_user_transaction_db(family_id, user_id)
     if not last_trans:
         bot.send_message(
@@ -1554,6 +1564,9 @@ def cancel_last_transaction(message):
             reply_markup=get_main_menu(),
         )
         return
+
+    # Очищаем любые другие состояния
+    delete_user_state_db(user_id)
 
     save_user_state_db(
         user_id,
@@ -1564,9 +1577,18 @@ def cancel_last_transaction(message):
         },
     )
 
+    # Формируем сообщение с подтверждением
+    message_text = (
+        f"⚠️ **Подтверждение отмены**\n\n"
+        f"Вы действительно хотите отменить последнюю операцию?\n\n"
+        f"📌 {last_trans['type']} на сумму `{last_trans['amount']:.2f} руб.`\n"
+        f"📅 {last_trans['date'].strftime('%d.%m.%Y %H:%M')}\n"
+        f"🏷️ {last_trans['category_name']}"
+    )
+
     bot.send_message(
         message.chat.id,
-        f"⚠️ **Подтверждение отмены**\n\nВы действительно хотите отменить последнюю операцию?\n\n📌 {last_trans['type']} на сумму `{last_trans['amount']:.2f} руб.`\n📅 {last_trans['date'].strftime('%d.%m.%Y %H:%M')}\n🏷️ {last_trans['category_name']}",
+        message_text,
         parse_mode="Markdown",
         reply_markup=get_cancel_confirmation_menu(),
     )
@@ -1575,11 +1597,12 @@ def cancel_last_transaction(message):
 @bot.message_handler(
     func=lambda message: message.text
     and get_user_state_db(message.from_user.id).get("action") == "confirm_cancel"
-    and message.text in ["❌ Удалить", "🔙 Отмена"]
 )
 def handle_cancel_confirmation(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
+
+    logging.info(f"🔍 Обработка подтверждения отмены: {message.text}")
 
     if message.text == "🔙 Отмена":
         delete_user_state_db(user_id)
@@ -1590,24 +1613,27 @@ def handle_cancel_confirmation(message):
         )
         return
 
-    transaction_id = state["transaction_id"]
-    delete_transaction_db(transaction_id)
-    load_data_to_memory()
-    delete_user_state_db(user_id)
+    if message.text == "❌ Удалить":
+        transaction_id = state.get("transaction_id")
+        if transaction_id:
+            delete_transaction_db(transaction_id)
+            load_data_to_memory()
+            delete_user_state_db(user_id)
+            bot.send_message(
+                message.chat.id,
+                "✅ Операция успешно удалена!",
+                reply_markup=get_main_menu(),
+            )
+        else:
+            delete_user_state_db(user_id)
+            bot.send_message(
+                message.chat.id,
+                "❌ Ошибка: операция не найдена.",
+                reply_markup=get_main_menu(),
+            )
+        return
 
-    bot.send_message(
-        message.chat.id,
-        "✅ Операция успешно удалена!",
-        reply_markup=get_main_menu(),
-    )
-
-
-@bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "confirm_cancel"
-    and message.text not in ["❌ Удалить", "🔙 Отмена"]
-)
-def handle_cancel_confirmation_invalid(message):
+    # Если пользователь ввел что-то другое
     bot.send_message(
         message.chat.id,
         "Пожалуйста, выберите один из предложенных вариантов: «❌ Удалить» или «🔙 Отмена».",
@@ -2497,28 +2523,37 @@ def ask_notify_days(chat_id, user_id):
         types.KeyboardButton("Не напоминать"),
         types.KeyboardButton("❌ Отмена"),
     )
-    msg = bot.send_message(chat_id, "За сколько дней напоминать?", reply_markup=markup)
-    bot.register_next_step_handler(msg, add_reminder_notify_days)
+    bot.send_message(chat_id, "За сколько дней напоминать?", reply_markup=markup)
 
 
+@bot.message_handler(
+    func=lambda message: message.text
+    and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+    and message.text in ["1 день", "2 дня", "3 дня", "Не напоминать", "❌ Отмена"]
+)
 def add_reminder_notify_days(message):
     user_id = message.from_user.id
+
     if message.text == "❌ Отмена":
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
         )
         return
+
     days_map = {"1 день": [1], "2 дня": [2], "3 дня": [3], "Не напоминать": []}
     notify_days = days_map.get(message.text, [1])
+
     state = get_user_state_db(user_id)
     if not state or state.get("action") != "add_reminder":
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
         return
+
     family_id = get_user_family_db(user_id)
     next_date = calculate_next_date(state["reminder_frequency"], state["reminder_day"])
+
     reminder = {
         "title": state["reminder_title"],
         "amount": state["reminder_amount"],
@@ -2529,12 +2564,29 @@ def add_reminder_notify_days(message):
         "next_due_date": next_date,
         "notify_days_before": notify_days,
     }
+
     add_reminder_db(family_id, user_id, reminder)
     load_data_to_memory()
     delete_user_state_db(user_id)
+
+    # Формируем сообщение с подтверждением
+    freq_text = "Ежемесячно" if reminder["frequency"] == "monthly" else "Еженедельно"
+    notify_text = (
+        ", ".join([f"{d} дн." for d in notify_days]) if notify_days else "Не напоминать"
+    )
+
+    confirmation_text = (
+        f"✅ **Напоминание создано!**\n\n"
+        f"📌 {reminder['title']}\n"
+        f"💰 {reminder['amount']:.2f} руб.\n"
+        f"📅 {freq_text}\n"
+        f"📆 Следующий платеж: {next_date.strftime('%d.%m.%Y')}\n"
+        f"🔔 Напомнить за: {notify_text}"
+    )
+
     bot.send_message(
         message.chat.id,
-        f"✅ **Напоминание создано!**\n\n📌 {reminder['title']}\n💰 {reminder['amount']:.2f} руб.\n📅 Следующий платеж: {next_date.strftime('%d.%m.%Y')}",
+        confirmation_text,
         parse_mode="Markdown",
         reply_markup=get_main_menu(),
     )
