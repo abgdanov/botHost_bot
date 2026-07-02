@@ -486,6 +486,7 @@ def load_data_to_memory():
 def add_category_db(family_id, name, category_type, parent_id=None):
     with get_db() as conn:
         cursor = conn.cursor()
+        # Проверяем, существует ли уже такая категория
         cursor.execute(
             "SELECT 1 FROM categories WHERE family_id = ? AND name = ? AND type = ? AND parent_id IS ?",
             (family_id, name, category_type, parent_id),
@@ -508,7 +509,7 @@ def get_categories_db(family_id, category_type=None, parent_id=None):
             query += " AND type = ?"
             params.append(category_type)
         if parent_id is not None:
-            query += " AND parent_id IS ?"
+            query += " AND parent_id = ?"
             params.append(parent_id)
         else:
             query += " AND parent_id IS NULL"
@@ -881,6 +882,7 @@ def add_subcategory_parent(message):
 
     state["parent_id"] = parent_cat["id"]
     state["parent_name"] = parent_name
+    state["category_type"] = parent_cat["type"]  # Сохраняем тип категории
     save_user_state_db(user_id, state)
 
     msg = bot.send_message(
@@ -917,8 +919,10 @@ def add_subcategory_name(message):
 
     family_id = get_user_family_db(user_id)
     parent_id = state["parent_id"]
+    category_type = state.get("category_type")  # Берём тип от родителя
 
-    if add_category_db(family_id, name, None, parent_id):
+    # Добавляем подкатегорию с типом родителя
+    if add_category_db(family_id, name, category_type, parent_id):
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id,
@@ -1114,7 +1118,6 @@ def list_categories(message):
 
     # Расходы
     response += "💰 **Расходы:**\n"
-    # Стандартные
     expense_cats = get_categories_db(family_id, "expense")
     for cat in expense_cats:
         if cat["is_standard"]:
@@ -1216,14 +1219,34 @@ def handle_menu(message):
 def handle_category_selection(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-    selected_category = message.text.replace(" (стандартная)", "").strip()
+    selected_label = message.text.replace(" (стандартная)", "").strip()
 
     family_id = get_user_family_db(user_id)
     trans_type = state["type"]
 
-    # Получаем категорию
+    # Получаем категорию по имени (с учётом эмодзи)
     categories = state.get("categories", [])
-    category = next((c for c in categories if c["name"] == selected_category), None)
+    category = None
+
+    # 1. Прямое совпадение
+    for c in categories:
+        if c["name"] == selected_label:
+            category = c
+            break
+
+    # 2. Если не нашли — пробуем по очищенному имени
+    if not category:
+        clean_label = "".join(
+            ch for ch in selected_label if ch.isalnum() or ch.isspace()
+        ).strip()
+        for c in categories:
+            clean_cat = "".join(
+                ch for ch in c["name"] if ch.isalnum() or ch.isspace()
+            ).strip()
+            if clean_cat == clean_label:
+                category = c
+                break
+
     if not category:
         bot.send_message(
             message.chat.id,
@@ -1243,7 +1266,6 @@ def handle_category_selection(message):
         subcategories = [dict(row) for row in cursor.fetchall()]
 
     if subcategories:
-        # Показываем подкатегории
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
         markup.add(types.KeyboardButton("➡️ Без подкатегории"))
         for sub in subcategories:
@@ -1251,25 +1273,24 @@ def handle_category_selection(message):
         markup.add(types.KeyboardButton("❌ Отмена"))
 
         state["selected_category_id"] = category["id"]
-        state["selected_category_name"] = selected_category
+        state["selected_category_name"] = category["name"]
         state["subcategories"] = [s["name"] for s in subcategories]
         save_user_state_db(user_id, state)
 
         bot.send_message(
             message.chat.id,
-            f"Вы выбрали «{selected_category}».\n\nВыберите подкатегорию или «Без подкатегории»:",
+            f"Вы выбрали «{category['name']}».\n\nВыберите подкатегорию или «Без подкатегории»:",
             reply_markup=markup,
         )
     else:
-        # Нет подкатегорий, сразу запрашиваем сумму
         state["category_id"] = category["id"]
-        state["category_name"] = selected_category
+        state["category_name"] = category["name"]
         state["subcategory"] = None
         save_user_state_db(user_id, state)
 
         msg = bot.send_message(
             message.chat.id,
-            f"Вы выбрали: *{selected_category}*.\nВведите сумму цифрами:",
+            f"Вы выбрали: *{category['name']}*.\nВведите сумму цифрами:",
             parse_mode="Markdown",
             reply_markup=types.ReplyKeyboardRemove(),
         )
@@ -1570,11 +1591,6 @@ def show_balance_and_history(message):
     # Статистика с начала месяца
     days_in_month = (now - start_of_month).days + 1
     avg_spent_per_day = total_expense / days_in_month if days_in_month > 0 else 0
-
-    # Баланс на начало месяца (приблизительно)
-    # Для простоты считаем, что баланс на начало месяца = текущий баланс - изменение за месяц
-    # Но точнее: нужно получить баланс на момент начала месяца
-    # Пока просто покажем текущий баланс и изменение
 
     response = f"💰 **БАЛАНС СЕМЬИ:** {balance:+.2f} руб.\n"
     response += f"   📥 Доходы: {total_income:.2f} руб.\n"
@@ -1956,7 +1972,25 @@ def set_limit_amount(message):
     selected_category = message.text.replace(" (стандартная)", "").strip()
 
     categories = state.get("categories", [])
-    category = next((c for c in categories if c["name"] == selected_category), None)
+    category = None
+    for c in categories:
+        if c["name"] == selected_category:
+            category = c
+            break
+
+    if not category:
+        # Пробуем по очищенному имени
+        clean_sel = "".join(
+            ch for ch in selected_category if ch.isalnum() or ch.isspace()
+        ).strip()
+        for c in categories:
+            clean_cat = "".join(
+                ch for ch in c["name"] if ch.isalnum() or ch.isspace()
+            ).strip()
+            if clean_cat == clean_sel:
+                category = c
+                break
+
     if not category:
         bot.send_message(
             message.chat.id,
@@ -1967,12 +2001,12 @@ def set_limit_amount(message):
         return
 
     state["category_id"] = category["id"]
-    state["category_name"] = selected_category
+    state["category_name"] = category["name"]
     save_user_state_db(user_id, state)
 
     msg = bot.send_message(
         message.chat.id,
-        f"Введите лимит для категории *{selected_category}* (в рублях):\nНапример: 15000",
+        f"Введите лимит для категории *{category['name']}* (в рублях):\nНапример: 15000",
         parse_mode="Markdown",
         reply_markup=types.ReplyKeyboardRemove(),
     )
@@ -2236,7 +2270,24 @@ def add_reminder_category(message):
     selected_category = message.text.replace(" (стандартная)", "").strip()
 
     categories = state.get("categories", [])
-    category = next((c for c in categories if c["name"] == selected_category), None)
+    category = None
+    for c in categories:
+        if c["name"] == selected_category:
+            category = c
+            break
+
+    if not category:
+        clean_sel = "".join(
+            ch for ch in selected_category if ch.isalnum() or ch.isspace()
+        ).strip()
+        for c in categories:
+            clean_cat = "".join(
+                ch for ch in c["name"] if ch.isalnum() or ch.isspace()
+            ).strip()
+            if clean_cat == clean_sel:
+                category = c
+                break
+
     if not category:
         bot.send_message(
             message.chat.id,
@@ -2246,7 +2297,7 @@ def add_reminder_category(message):
         delete_user_state_db(user_id)
         return
 
-    state["reminder_category"] = selected_category
+    state["reminder_category"] = category["name"]
     state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
 
