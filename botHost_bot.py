@@ -11,23 +11,20 @@ import os
 import sys
 from contextlib import contextmanager
 
-# Импортируем словарь эмодзи
 from emoji_dict import get_emoji
 
-# Включаем логирование
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
+logger = logging.getLogger(__name__)
 
-# --- ЗАГРУЗКА ТОКЕНА ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
-    print("❌ ОШИБКА: Токен не найден! Установите переменную TELEGRAM_BOT_TOKEN")
+    logger.error("❌ Токен не найден! Установите переменную TELEGRAM_BOT_TOKEN")
     sys.exit(1)
 
 bot = telebot.TeleBot(TOKEN)
 
-# --- ЛОКАЛЬНОЕ ХРАНИЛИЩЕ ---
 USER_FAMILIES = {}
 FAMILY_MEMBERS = {}
 USER_STATES = {}
@@ -35,7 +32,6 @@ TRANSACTIONS = []
 REMINDERS = {}
 BUDGET_LIMITS = {}
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ ---
 DB_NAME = os.path.join(os.path.dirname(__file__), "family_budget.db")
 
 
@@ -108,7 +104,6 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_budget_limits_category ON budget_limits(category_id)"
         )
 
-        # Создаём стандартные категории
         standard_categories = {
             "expense": [
                 "🛒 Продукты",
@@ -127,10 +122,9 @@ def init_db():
                     (cat_name, cat_type),
                 )
 
-        print("✅ База данных инициализирована")
+        logger.info("✅ База данных инициализирована")
 
 
-# --- ФУНКЦИИ ДЛЯ РАБОТЫ С БАЗОЙ ДАННЫХ ---
 def get_user_family_db(user_id):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -252,51 +246,43 @@ def get_category_full_name(category_id):
 
 
 def get_category_emoji(category_name):
-    """Получить эмодзи для категории из отдельного файла"""
     if not category_name:
         return "📌"
 
-    # Проверяем, есть ли уже эмодзи в начале названия
     first_char = category_name[0]
     emoji_ranges = [
-        (0x1F600, 0x1F64F),  # смайлики
-        (0x1F300, 0x1F5FF),  # символы и пиктограммы
-        (0x1F680, 0x1F6FF),  # транспорт
-        (0x2600, 0x26FF),  # прочие символы
-        (0x2700, 0x27BF),  # Dingbats
+        (0x1F600, 0x1F64F),
+        (0x1F300, 0x1F5FF),
+        (0x1F680, 0x1F6FF),
+        (0x2600, 0x26FF),
+        (0x2700, 0x27BF),
     ]
     code = ord(first_char)
     for start, end in emoji_ranges:
         if start <= code <= end:
             return first_char
 
-    # Используем словарь из отдельного файла
     return get_emoji(category_name)
 
 
 def add_emoji_to_category_name(name):
-    """Автоматически добавляет эмодзи к названию категории, если его нет"""
     if not name:
         return name
 
-    # Проверяем, есть ли уже эмодзи в начале
     first_char = name[0]
     emoji_ranges = [
-        (0x1F600, 0x1F64F),  # смайлики
-        (0x1F300, 0x1F5FF),  # символы и пиктограммы
-        (0x1F680, 0x1F6FF),  # транспорт
-        (0x2600, 0x26FF),  # прочие символы
-        (0x2700, 0x27BF),  # Dingbats
+        (0x1F600, 0x1F64F),
+        (0x1F300, 0x1F5FF),
+        (0x1F680, 0x1F6FF),
+        (0x2600, 0x26FF),
+        (0x2700, 0x27BF),
     ]
     code = ord(first_char)
     for start, end in emoji_ranges:
         if start <= code <= end:
-            return name  # уже есть эмодзи
+            return name
 
-    # Ищем подходящий эмодзи
     emoji = get_category_emoji(name)
-
-    # Если нашли эмодзи и это не "📌" (значит есть совпадение)
     if emoji and emoji != "📌":
         if not name.startswith(emoji):
             return f"{emoji} {name}"
@@ -516,12 +502,11 @@ def load_data_to_memory():
         cursor.execute("SELECT user_id, state_data FROM user_states")
         for row in cursor.fetchall():
             USER_STATES[row["user_id"]] = json.loads(row["state_data"])
-    print(
+    logger.info(
         f"📦 Данные загружены: {len(USER_FAMILIES)} пользователей, {len(TRANSACTIONS)} транзакций"
     )
 
 
-# --- ФУНКЦИИ ДЛЯ РАБОТЫ С КАТЕГОРИЯМИ ---
 def add_category_db(family_id, name, category_type, parent_id=None):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -557,7 +542,6 @@ def get_categories_db(family_id, category_type=None, parent_id=None):
             params.append(parent_id)
         else:
             query += " AND parent_id IS NULL"
-        # Сортировка: сначала пользовательские (family_id NOT NULL), потом стандартные
         query += " ORDER BY CASE WHEN family_id IS NOT NULL THEN 0 ELSE 1 END, name"
         cursor.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
@@ -603,7 +587,6 @@ def delete_category_db(category_id, family_id):
         return has_transactions, has_subcategories
 
 
-# --- КНОПКИ МЕНЮ ---
 def get_main_menu():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     btn1 = types.KeyboardButton("📉 Добавить Расход")
@@ -679,7 +662,6 @@ def get_categories_menu():
 
 
 def get_cancel_confirmation_menu():
-    """Клавиатура для подтверждения отмены - ИСПРАВЛЕНО на InlineKeyboard"""
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn1 = types.InlineKeyboardButton("❌ Удалить", callback_data="cancel_confirm_yes")
     btn2 = types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_confirm_no")
@@ -688,15 +670,18 @@ def get_cancel_confirmation_menu():
 
 
 # ============================================
-# ========== ВСЕ ХЕНДЛЕРЫ КНОПОК ============
+# ========== ХЕНДЛЕРЫ КОМАНД ============
 # ============================================
 
 
-# --- ГЛАВНОЕ МЕНЮ ---
 @bot.message_handler(commands=["start"])
 def start_message(message):
     user_id = message.from_user.id
     first_name = message.from_user.first_name
+    logger.info(f"🔄 Команда /start от пользователя {user_id} ({first_name})")
+
+    delete_user_state_db(user_id)
+
     family_id = get_user_family_db(user_id)
     if family_id:
         bot.send_message(
@@ -713,10 +698,18 @@ def start_message(message):
         )
 
 
-# --- АВТОРИЗАЦИЯ ---
+# ============================================
+# ========== АВТОРИЗАЦИЯ ============
+# ============================================
+
+
 @bot.message_handler(func=lambda message: message.text == "🏠 Создать новую семью")
 def create_family(message):
     user_id = message.from_user.id
+    logger.info(f"🏠 Создание семьи от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
     while True:
         new_family_id = random.randint(10000, 99999)
         if not get_user_family_db(user_id):
@@ -734,6 +727,11 @@ def create_family(message):
 
 @bot.message_handler(func=lambda message: message.text == "🔑 Войти по ID семьи")
 def ask_family_id(message):
+    user_id = message.from_user.id
+    logger.info(f"🔑 Вход по ID семьи от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
     msg = bot.send_message(
         message.chat.id,
         "Введите 5-значный ID семьи:",
@@ -745,12 +743,15 @@ def ask_family_id(message):
 def save_family_id(message):
     user_id = message.from_user.id
     input_id = message.text.strip()
+    logger.info(f"🔍 Проверка ID семьи: {input_id} от пользователя {user_id}")
+
     if not input_id.isdigit() or len(input_id) != 5:
         msg = bot.send_message(
             message.chat.id, "❌ Ошибка! Нужно 5 цифр. Попробуйте еще раз:"
         )
         bot.register_next_step_handler(msg, save_family_id)
         return
+
     family_id = int(input_id)
     with get_db() as conn:
         cursor = conn.cursor()
@@ -762,6 +763,7 @@ def save_family_id(message):
                 reply_markup=get_auth_menu(),
             )
             return
+
     add_user_to_family_db(user_id, family_id, message.from_user.first_name)
     load_data_to_memory()
     bot.send_message(
@@ -772,15 +774,38 @@ def save_family_id(message):
     )
 
 
-# --- КАТЕГОРИИ ---
-@bot.message_handler(func=lambda message: message.text == "🏷️ Категории")
-def categories_handler(message):
+# ============================================
+# ========== ГЛАВНОЕ МЕНЮ ============
+# ============================================
+
+
+def clear_state_and_check_family(message):
     user_id = message.from_user.id
-    if not get_user_family_db(user_id):
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+    if not family_id:
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
         )
+        return None
+    return family_id
+
+
+# ============================================
+# ========== КАТЕГОРИИ ============
+# ============================================
+
+
+@bot.message_handler(func=lambda message: message.text == "🏷️ Категории")
+def categories_handler(message):
+    user_id = message.from_user.id
+    logger.info(f"🏷️ Категории от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
+    if not family_id:
         return
+
     bot.send_message(
         message.chat.id,
         "🏷️ **Управление категориями**\n\n"
@@ -798,6 +823,12 @@ def categories_handler(message):
 @bot.message_handler(func=lambda message: message.text == "➕ Добавить категорию")
 def add_category_start(message):
     user_id = message.from_user.id
+    logger.info(f"➕ Добавить категорию от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
+    if not family_id:
+        return
+
     save_user_state_db(user_id, {"action": "add_category"})
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add(types.KeyboardButton("💰 Расход"), types.KeyboardButton("📈 Доход"))
@@ -810,33 +841,19 @@ def add_category_start(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text == "💰 Расход"
-    and get_user_state_db(message.from_user.id).get("action") == "add_category"
-)
-def add_category_type_expense(message):
-    user_id = message.from_user.id
-    state = get_user_state_db(user_id)
-    state["category_type"] = "expense"
-    save_user_state_db(user_id, state)
-    msg = bot.send_message(
-        message.chat.id,
-        "Введите название категории:\n\n"
-        "Например: «🚕 Такси», «💻 Подписки»\n"
-        "❌ Отмена",
-        reply_markup=types.ReplyKeyboardRemove(),
+    func=lambda message: (
+        message.text in ["💰 Расход", "📈 Доход"]
+        and get_user_state_db(message.from_user.id).get("action") == "add_category"
     )
-    bot.register_next_step_handler(msg, add_category_name)
-
-
-@bot.message_handler(
-    func=lambda message: message.text == "📈 Доход"
-    and get_user_state_db(message.from_user.id).get("action") == "add_category"
 )
-def add_category_type_income(message):
+def add_category_type(message):
     user_id = message.from_user.id
+    logger.info(f"📌 Выбран тип категории: {message.text} от пользователя {user_id}")
+
     state = get_user_state_db(user_id)
-    state["category_type"] = "income"
+    state["category_type"] = "expense" if message.text == "💰 Расход" else "income"
     save_user_state_db(user_id, state)
+
     msg = bot.send_message(
         message.chat.id,
         "Введите название категории:\n\n"
@@ -849,18 +866,23 @@ def add_category_type_income(message):
 
 def add_category_name(message):
     user_id = message.from_user.id
+
     if message.text == "❌ Отмена":
+        logger.info(f"❌ Отмена добавления категории от пользователя {user_id}")
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
         )
         return
+
     state = get_user_state_db(user_id)
     if not state or state.get("action") != "add_category":
+        logger.warning(f"⚠️ Неверное состояние при добавлении категории: {state}")
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
         return
+
     name = message.text.strip()
     if not name:
         msg = bot.send_message(
@@ -869,10 +891,9 @@ def add_category_name(message):
         bot.register_next_step_handler(msg, add_category_name)
         return
 
-    # Автоматическое добавление эмодзи
     name_with_emoji = add_emoji_to_category_name(name)
     if name_with_emoji != name:
-        logging.info(f"✨ Добавлен эмодзи: '{name}' → '{name_with_emoji}'")
+        logger.info(f"✨ Добавлен эмодзи: '{name}' → '{name_with_emoji}'")
 
     family_id = get_user_family_db(user_id)
     category_type = state["category_type"]
@@ -895,7 +916,9 @@ def add_category_name(message):
 @bot.message_handler(func=lambda message: message.text == "📂 Добавить подкатегорию")
 def add_subcategory_start(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"📂 Добавить подкатегорию от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
 
@@ -929,14 +952,19 @@ def add_subcategory_start(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "add_subcategory"
-    and message.text != "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "add_subcategory"
+        and message.text != "❌ Отмена"
+    )
 )
 def add_subcategory_parent(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     parent_name = message.text.strip()
+    logger.info(
+        f"📌 Выбрана родительская категория: {parent_name} от пользователя {user_id}"
+    )
 
     parent_categories = state.get("parent_categories", [])
     parent_cat = next((c for c in parent_categories if c["name"] == parent_name), None)
@@ -964,7 +992,9 @@ def add_subcategory_parent(message):
 
 def add_subcategory_name(message):
     user_id = message.from_user.id
+
     if message.text == "❌ Отмена":
+        logger.info(f"❌ Отмена добавления подкатегории от пользователя {user_id}")
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
@@ -973,6 +1003,7 @@ def add_subcategory_name(message):
 
     state = get_user_state_db(user_id)
     if not state or state.get("action") != "add_subcategory":
+        logger.warning(f"⚠️ Неверное состояние при добавлении подкатегории: {state}")
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
@@ -986,10 +1017,9 @@ def add_subcategory_name(message):
         bot.register_next_step_handler(msg, add_subcategory_name)
         return
 
-    # Автоматическое добавление эмодзи
     name_with_emoji = add_emoji_to_category_name(name)
     if name_with_emoji != name:
-        logging.info(
+        logger.info(
             f"✨ Добавлен эмодзи для подкатегории: '{name}' → '{name_with_emoji}'"
         )
 
@@ -1015,7 +1045,9 @@ def add_subcategory_name(message):
 @bot.message_handler(func=lambda message: message.text == "🗑️ Удалить категорию")
 def delete_category_start(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"🗑️ Удалить категорию от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
 
@@ -1061,14 +1093,17 @@ def delete_category_start(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "delete_category"
-    and message.text != "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "delete_category"
+        and message.text != "❌ Отмена"
+    )
 )
 def delete_category_confirm(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_name = message.text.replace(" 📂", "").strip()
+    logger.info(f"🗑️ Удаление категории: {selected_name} от пользователя {user_id}")
 
     user_categories = state.get("user_categories", [])
     category = next((c for c in user_categories if c["name"] == selected_name), None)
@@ -1135,13 +1170,15 @@ def delete_category_confirm(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "confirm_delete"
-    and message.text in ["да", "нет"]
+    func=lambda message: (
+        message.text in ["да", "нет"]
+        and get_user_state_db(message.from_user.id).get("action") == "confirm_delete"
+    )
 )
 def confirm_delete_category(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
+    logger.info(f"✅ Подтверждение удаления: {message.text} от пользователя {user_id}")
 
     if message.text == "нет":
         delete_user_state_db(user_id)
@@ -1166,22 +1203,12 @@ def confirm_delete_category(message):
     )
 
 
-@bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "confirm_delete"
-    and message.text not in ["да", "нет"]
-)
-def confirm_delete_category_invalid(message):
-    bot.send_message(
-        message.chat.id,
-        "Пожалуйста, ответьте «да» или «нет».",
-    )
-
-
 @bot.message_handler(func=lambda message: message.text == "📋 Список категорий")
 def list_categories(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"📋 Список категорий от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
 
@@ -1224,14 +1251,21 @@ def list_categories(message):
     bot.send_message(message.chat.id, response, parse_mode="Markdown")
 
 
-# --- УЧЕТ РАСХОДОВ И ДОХОДОВ ---
+# ============================================
+# ========== УЧЕТ РАСХОДОВ И ДОХОДОВ ============
+# ============================================
+
+
 @bot.message_handler(
     func=lambda message: message.text in ["📉 Добавить Расход", "📈 Добавить Доход"]
 )
 def handle_menu(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"📊 {message.text} от пользователя {user_id}")
 
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
     if not family_id:
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
@@ -1275,36 +1309,33 @@ def handle_menu(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
-    and message.text != "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+        and message.text != "❌ Отмена"
+    )
 )
 def handle_category_selection(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_label = message.text.strip()
+    logger.info(f"🔍 Выбрана категория: {selected_label} от пользователя {user_id}")
 
     family_id = get_user_family_db(user_id)
 
-    logging.info(f"🔍 Выбрана категория: {selected_label}")
-
-    # ПРОВЕРКА: Если в состоянии уже есть selected_category_id,
-    # значит это выбор подкатегории
     if "selected_category_id" in state:
-        logging.info("📌 Это выбор ПОДКАТЕГОРИИ, перенаправляем...")
+        logger.info("📌 Это выбор ПОДКАТЕГОРИИ, перенаправляем...")
         handle_subcategory_selection(message)
         return
 
     categories = state.get("categories", [])
     category = None
 
-    # Ищем категорию по точному совпадению
     for c in categories:
         if c["name"] == selected_label:
             category = c
             break
 
-    # Если не нашли, пробуем без эмодзи
     if not category:
         clean_label = "".join(
             ch for ch in selected_label if ch.isalnum() or ch.isspace()
@@ -1318,7 +1349,7 @@ def handle_category_selection(message):
                 break
 
     if not category:
-        logging.error(f"❌ Категория не найдена: {selected_label}")
+        logger.error(f"❌ Категория не найдена: {selected_label}")
         bot.send_message(
             message.chat.id,
             "❌ Категория не найдена. Попробуйте еще раз.",
@@ -1327,9 +1358,8 @@ def handle_category_selection(message):
         delete_user_state_db(user_id)
         return
 
-    logging.info(f"✅ Найдена категория: {category['name']} (id={category['id']})")
+    logger.info(f"✅ Найдена категория: {category['name']} (id={category['id']})")
 
-    # Получаем подкатегории для этой категории
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -1341,11 +1371,9 @@ def handle_category_selection(message):
         )
         subcategories = [dict(row) for row in cursor.fetchall()]
 
-    logging.info(f"📂 Найдено подкатегорий: {len(subcategories)}")
+    logger.info(f"📂 Найдено подкатегорий: {len(subcategories)}")
     for sub in subcategories:
-        logging.info(
-            f"  - {sub['name']} (id={sub['id']}, parent_id={sub['parent_id']})"
-        )
+        logger.info(f"  - {sub['name']} (id={sub['id']}, parent_id={sub['parent_id']})")
 
     if subcategories:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -1354,14 +1382,13 @@ def handle_category_selection(message):
             markup.add(types.KeyboardButton(sub["name"]))
         markup.add(types.KeyboardButton("❌ Отмена"))
 
-        # СОХРАНЯЕМ ВСЁ в состоянии
         state["selected_category_id"] = category["id"]
         state["selected_category_name"] = category["name"]
-        state["subcategories"] = subcategories  # Полные объекты
+        state["subcategories"] = subcategories
         state["action"] = "add_transaction"
         save_user_state_db(user_id, state)
 
-        logging.info(
+        logger.info(
             f"💾 Сохранено состояние: parent_id={category['id']}, подкатегорий={len(subcategories)}"
         )
 
@@ -1371,7 +1398,6 @@ def handle_category_selection(message):
             reply_markup=markup,
         )
     else:
-        # Нет подкатегорий - сразу просим сумму
         state["category_id"] = category["id"]
         state["category_name"] = category["name"]
         state["subcategory"] = None
@@ -1388,15 +1414,16 @@ def handle_category_selection(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
-    and message.text in ["➡️ Без подкатегории", "❌ Отмена"]
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+        and message.text in ["➡️ Без подкатегории", "❌ Отмена"]
+    )
 )
 def handle_subcategory_special(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-
-    logging.info(f"🔍 СПЕЦИАЛЬНАЯ КНОПКА: {message.text}")
+    logger.info(f"🔍 СПЕЦИАЛЬНАЯ КНОПКА: {message.text} от пользователя {user_id}")
 
     if message.text == "❌ Отмена":
         delete_user_state_db(user_id)
@@ -1431,21 +1458,22 @@ def handle_subcategory_special(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
-    and message.text not in ["➡️ Без подкатегории", "❌ Отмена"]
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+        and message.text not in ["➡️ Без подкатегории", "❌ Отмена"]
+    )
 )
 def handle_subcategory_selection(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_subcategory = message.text
+    logger.info(
+        f"🔍 Выбрана подкатегория: '{selected_subcategory}' от пользователя {user_id}"
+    )
 
-    logging.info("=" * 50)
-    logging.info(f"🔍 Выбрана подкатегория: '{selected_subcategory}'")
-
-    # Проверяем состояние
     if "subcategories" not in state:
-        logging.error("❌ В СОСТОЯНИИ НЕТ subcategories!")
+        logger.error("❌ В СОСТОЯНИИ НЕТ subcategories!")
         bot.send_message(
             message.chat.id,
             "❌ Ошибка: список подкатегорий потерян. Начните заново.",
@@ -1455,12 +1483,12 @@ def handle_subcategory_selection(message):
         return
 
     subcategories = state.get("subcategories", [])
-    logging.info(f"📂 Доступно подкатегорий: {len(subcategories)}")
+    logger.info(f"📂 Доступно подкатегорий: {len(subcategories)}")
     for sub in subcategories:
-        logging.info(f"  - '{sub['name']}' (id={sub.get('id')})")
+        logger.info(f"  - '{sub['name']}' (id={sub.get('id')})")
 
     if not subcategories:
-        logging.error("❌ СПИСОК ПОДКАТЕГОРИЙ ПУСТ!")
+        logger.error("❌ СПИСОК ПОДКАТЕГОРИЙ ПУСТ!")
         bot.send_message(
             message.chat.id,
             "❌ Ошибка: нет доступных подкатегорий. Начните заново.",
@@ -1469,35 +1497,32 @@ def handle_subcategory_selection(message):
         delete_user_state_db(user_id)
         return
 
-    # Ищем подкатегорию
     selected_sub = None
 
-    # 1. Точное совпадение
     for sub in subcategories:
         if sub["name"] == selected_subcategory:
             selected_sub = sub
-            logging.info(f"✅ Найдено по точному совпадению: {sub['name']}")
+            logger.info(f"✅ Найдено по точному совпадению: {sub['name']}")
             break
 
-    # 2. Без эмодзи
     if not selected_sub:
         clean_label = "".join(
             ch for ch in selected_subcategory if ch.isalnum() or ch.isspace()
         ).strip()
-        logging.info(f"🔍 Ищем без эмодзи: '{clean_label}'")
+        logger.info(f"🔍 Ищем без эмодзи: '{clean_label}'")
         for sub in subcategories:
             clean_sub = "".join(
                 ch for ch in sub["name"] if ch.isalnum() or ch.isspace()
             ).strip()
             if clean_sub == clean_label:
                 selected_sub = sub
-                logging.info(f"✅ Найдено без эмодзи: {sub['name']}")
+                logger.info(f"✅ Найдено без эмодзи: {sub['name']}")
                 break
 
     if not selected_sub:
-        logging.error(f"❌ ПОДКАТЕГОРИЯ НЕ НАЙДЕНА: '{selected_subcategory}'")
+        logger.error(f"❌ ПОДКАТЕГОРИЯ НЕ НАЙДЕНА: '{selected_subcategory}'")
         available = [sub["name"] for sub in subcategories]
-        logging.error(f"   ДОСТУПНО: {available}")
+        logger.error(f"   ДОСТУПНО: {available}")
         bot.send_message(
             message.chat.id,
             f"❌ Подкатегория не найдена. Пожалуйста, выберите из списка.",
@@ -1506,11 +1531,10 @@ def handle_subcategory_selection(message):
         delete_user_state_db(user_id)
         return
 
-    logging.info(
+    logger.info(
         f"✅ НАЙДЕНА ПОДКАТЕГОРИЯ: {selected_sub['name']} (id={selected_sub['id']})"
     )
 
-    # Сохраняем выбранную подкатегорию
     parent_name = state.get("selected_category_name", "Категория")
     state["category_id"] = selected_sub["id"]
     state["category_name"] = f"{parent_name} → {selected_sub['name']}"
@@ -1529,7 +1553,9 @@ def handle_subcategory_selection(message):
 
 @bot.message_handler(func=lambda message: message.text == "❌ Отмена")
 def cancel_operation(message):
-    delete_user_state_db(message.from_user.id)
+    user_id = message.from_user.id
+    logger.info(f"❌ Отмена операции от пользователя {user_id}")
+    delete_user_state_db(user_id)
     bot.send_message(
         message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
     )
@@ -1539,8 +1565,10 @@ def handle_amount(message):
     user_id = message.from_user.id
     input_text = message.text.replace(",", ".")
     state = get_user_state_db(user_id)
+    logger.info(f"💰 Ввод суммы: {input_text} от пользователя {user_id}")
 
     if not state or state.get("action") != "add_transaction":
+        logger.warning(f"⚠️ Неверное состояние при вводе суммы: {state}")
         bot.send_message(
             message.chat.id,
             "Ошибка сессии. Начните заново.",
@@ -1614,28 +1642,24 @@ def handle_amount(message):
     )
 
 
-# --- ОТМЕНА ОПЕРАЦИИ С ПОДТВЕРЖДЕНИЕМ (ИСПРАВЛЕНО) ---
+# ============================================
+# ========== ОТМЕНА ОПЕРАЦИИ ============
+# ============================================
+
+
 @bot.message_handler(func=lambda message: message.text == "↩️ Отменить операцию")
 def cancel_last_transaction(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"↩️ Отменить операцию от пользователя {user_id}")
 
+    family_id = get_user_family_db(user_id)
     if not family_id:
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
         )
         return
 
-    # Проверяем, есть ли уже состояние отмены
-    state = get_user_state_db(user_id)
-    if state.get("action") == "confirm_cancel":
-        # Если уже в процессе отмены - просто показываем меню
-        bot.send_message(
-            message.chat.id,
-            "⚠️ Вы уже в процессе отмены. Выберите действие:",
-            reply_markup=get_cancel_confirmation_menu(),
-        )
-        return
+    delete_user_state_db(user_id)
 
     last_trans = get_last_user_transaction_db(family_id, user_id)
     if not last_trans:
@@ -1646,10 +1670,6 @@ def cancel_last_transaction(message):
         )
         return
 
-    # Очищаем любые другие состояния
-    delete_user_state_db(user_id)
-
-    # Сохраняем состояние отмены
     save_user_state_db(
         user_id,
         {
@@ -1658,7 +1678,6 @@ def cancel_last_transaction(message):
         },
     )
 
-    # Формируем сообщение с подтверждением
     message_text = (
         f"⚠️ **Подтверждение отмены**\n\n"
         f"Вы действительно хотите отменить последнюю операцию?\n\n"
@@ -1667,7 +1686,6 @@ def cancel_last_transaction(message):
         f"🏷️ {last_trans['category_name']}"
     )
 
-    # ПОКАЗЫВАЕМ InlineKeyboard меню подтверждения
     bot.send_message(
         message.chat.id,
         message_text,
@@ -1676,65 +1694,81 @@ def cancel_last_transaction(message):
     )
 
 
-# --- ОБРАБОТЧИК CALLBACK ДЛЯ ОТМЕНЫ (НОВЫЙ) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_confirm_"))
 def handle_cancel_callback(call):
     user_id = call.from_user.id
     state = get_user_state_db(user_id)
+    logger.info(f"🔍 Callback отмены: {call.data} от пользователя {user_id}")
 
-    logging.info(f"🔍 Callback отмены: {call.data}")
+    try:
+        if call.data == "cancel_confirm_no":
+            logger.info(f"❌ Отмена операции отклонена пользователем {user_id}")
+            delete_user_state_db(user_id)
+            bot.edit_message_text(
+                "❌ Отмена операции отклонена.",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+            bot.send_message(
+                call.message.chat.id,
+                "Возвращаемся в главное меню.",
+                reply_markup=get_main_menu(),
+            )
+            bot.answer_callback_query(call.id)
+            return
 
-    if call.data == "cancel_confirm_no":
+        if call.data == "cancel_confirm_yes":
+            transaction_id = state.get("transaction_id")
+            if transaction_id:
+                logger.info(
+                    f"✅ Удаление транзакции {transaction_id} пользователем {user_id}"
+                )
+                delete_transaction_db(transaction_id)
+                load_data_to_memory()
+                delete_user_state_db(user_id)
+                bot.edit_message_text(
+                    "✅ Операция успешно удалена!",
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                )
+                bot.send_message(
+                    call.message.chat.id,
+                    "Возвращаемся в главное меню.",
+                    reply_markup=get_main_menu(),
+                )
+            else:
+                logger.warning(f"⚠️ Транзакция не найдена для пользователя {user_id}")
+                delete_user_state_db(user_id)
+                bot.edit_message_text(
+                    "❌ Ошибка: операция не найдена.",
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                )
+                bot.send_message(
+                    call.message.chat.id,
+                    "Возвращаемся в главное меню.",
+                    reply_markup=get_main_menu(),
+                )
+            bot.answer_callback_query(call.id)
+            return
+    except Exception as e:
+        logger.error(f"❌ Ошибка в handle_cancel_callback: {e}", exc_info=True)
+        bot.answer_callback_query(call.id, "Произошла ошибка, попробуйте снова")
         delete_user_state_db(user_id)
-        bot.edit_message_text(
-            "Операция отменена.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-        )
-        bot.send_message(
-            call.message.chat.id,
-            "Возвращаемся в главное меню.",
-            reply_markup=get_main_menu(),
-        )
-        bot.answer_callback_query(call.id)
-        return
-
-    if call.data == "cancel_confirm_yes":
-        transaction_id = state.get("transaction_id")
-        if transaction_id:
-            delete_transaction_db(transaction_id)
-            load_data_to_memory()
-            delete_user_state_db(user_id)
-            bot.edit_message_text(
-                "✅ Операция успешно удалена!",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-            )
-            bot.send_message(
-                call.message.chat.id,
-                "Возвращаемся в главное меню.",
-                reply_markup=get_main_menu(),
-            )
-        else:
-            delete_user_state_db(user_id)
-            bot.edit_message_text(
-                "❌ Ошибка: операция не найдена.",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-            )
-            bot.send_message(
-                call.message.chat.id,
-                "Возвращаемся в главное меню.",
-                reply_markup=get_main_menu(),
-            )
-        bot.answer_callback_query(call.id)
-        return
 
 
-# --- ИСТОРИЯ И БАЛАНС ---
+# ============================================
+# ========== ИСТОРИЯ И БАЛАНС ============
+# ============================================
+
+
 @bot.message_handler(func=lambda message: message.text == "📊 История и Баланс")
 def show_balance_and_history(message):
     user_id = message.from_user.id
+    logger.info(f"📊 История и Баланс от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
     family_id = get_user_family_db(user_id)
     if not family_id:
         bot.send_message(
@@ -1811,15 +1845,25 @@ def show_balance_and_history(message):
     bot.send_message(message.chat.id, response, parse_mode="Markdown")
 
 
-# --- ОТЧЕТЫ ---
+# ============================================
+# ========== ОТЧЕТЫ ============
+# ============================================
+
+
 @bot.message_handler(func=lambda message: message.text == "📊 Отчеты")
 def reports_handler(message):
     user_id = message.from_user.id
-    if not get_user_family_db(user_id):
+    logger.info(f"📊 Отчеты от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+    if not family_id:
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
         )
         return
+
     bot.send_message(
         message.chat.id,
         "📊 **Выберите тип отчета:**\n\n• Семейный отчет - общая статистика всей семьи\n• Личный отчет - только ваши доходы и расходы",
@@ -1834,6 +1878,9 @@ def reports_handler(message):
 def ask_period(message):
     user_id = message.from_user.id
     report_type = "family" if message.text == "🏠 Семейный отчет" else "personal"
+    logger.info(f"📊 Выбран отчет: {message.text} от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
     save_user_state_db(user_id, {"action": "select_period", "report_type": report_type})
     bot.send_message(
         message.chat.id,
@@ -1847,6 +1894,8 @@ def ask_period(message):
 def current_month_report(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
+    logger.info(f"📅 Текущий месяц от пользователя {user_id}")
+
     if not state or state.get("action") != "select_period":
         bot.send_message(
             message.chat.id,
@@ -1854,6 +1903,7 @@ def current_month_report(message):
             reply_markup=get_main_menu(),
         )
         return
+
     report_type, now = state["report_type"], datetime.now()
     start_date = datetime(now.year, now.month, 1)
     if now.month == 12:
@@ -1867,6 +1917,8 @@ def current_month_report(message):
 @bot.message_handler(func=lambda message: message.text == "🗓️ Произвольный период")
 def ask_start_date(message):
     user_id = message.from_user.id
+    logger.info(f"🗓️ Произвольный период от пользователя {user_id}")
+
     if not get_user_state_db(user_id).get("action") == "select_period":
         bot.send_message(
             message.chat.id,
@@ -1874,6 +1926,7 @@ def ask_start_date(message):
             reply_markup=get_main_menu(),
         )
         return
+
     msg = bot.send_message(
         message.chat.id,
         "📅 **Введите начальную дату**\nФормат: ДД.ММ.ГГГГ\nНапример: 01.01.2024",
@@ -1888,6 +1941,7 @@ def process_start_date(message):
     state = get_user_state_db(user_id)
     if not state:
         return
+
     try:
         start_date = datetime.strptime(message.text.strip(), "%d.%m.%Y")
         state["start_date"] = start_date.isoformat()
@@ -1910,6 +1964,7 @@ def process_end_date(message):
     state = get_user_state_db(user_id)
     if not state:
         return
+
     try:
         end_date = datetime.strptime(message.text.strip(), "%d.%m.%Y")
         start_date = datetime.fromisoformat(state["start_date"])
@@ -2068,15 +2123,25 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
     )
 
 
-# --- БЮДЖЕТНЫЕ ЛИМИТЫ ---
+# ============================================
+# ========== БЮДЖЕТНЫЕ ЛИМИТЫ ============
+# ============================================
+
+
 @bot.message_handler(func=lambda message: message.text == "💰 Бюджетные лимиты")
 def budget_limits_handler(message):
     user_id = message.from_user.id
-    if not get_user_family_db(user_id):
+    logger.info(f"💰 Бюджетные лимиты от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+    if not family_id:
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
         )
         return
+
     bot.send_message(
         message.chat.id,
         "💰 **Управление бюджетными лимитами**\n\nЛимиты общие для всей семьи. Бот предупредит при 80% и 100% использования.",
@@ -2088,7 +2153,9 @@ def budget_limits_handler(message):
 @bot.message_handler(func=lambda message: message.text == "📝 Установить лимит")
 def set_limit_category(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"📝 Установить лимит от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
 
@@ -2113,14 +2180,19 @@ def set_limit_category(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "set_limit"
-    and message.text != "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "set_limit"
+        and message.text != "❌ Отмена"
+    )
 )
 def set_limit_amount(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_category = message.text.strip()
+    logger.info(
+        f"📌 Выбрана категория для лимита: {selected_category} от пользователя {user_id}"
+    )
 
     categories = state.get("categories", [])
     category = None
@@ -2166,6 +2238,8 @@ def set_limit_amount(message):
 def save_limit_amount(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
+    logger.info(f"💰 Ввод лимита: {message.text} от пользователя {user_id}")
+
     if not state or state.get("action") != "set_limit":
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
@@ -2198,12 +2272,16 @@ def save_limit_amount(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "set_limit"
-    and message.text == "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "set_limit"
+        and message.text == "❌ Отмена"
+    )
 )
 def set_limit_cancel(message):
-    delete_user_state_db(message.from_user.id)
+    user_id = message.from_user.id
+    logger.info(f"❌ Отмена установки лимита от пользователя {user_id}")
+    delete_user_state_db(user_id)
     bot.send_message(
         message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
     )
@@ -2212,7 +2290,9 @@ def set_limit_cancel(message):
 @bot.message_handler(func=lambda message: message.text == "📊 Просмотреть лимиты")
 def view_limits(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"📊 Просмотреть лимиты от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
 
@@ -2267,7 +2347,9 @@ def view_limits(message):
 @bot.message_handler(func=lambda message: message.text == "🗑 Удалить лимит")
 def delete_limit_category(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"🗑 Удалить лимит от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
 
@@ -2292,13 +2374,18 @@ def delete_limit_category(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "delete_limit"
-    and message.text != "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "delete_limit"
+        and message.text != "❌ Отмена"
+    )
 )
 def confirm_delete_limit(message):
     user_id = message.from_user.id
     category_name = message.text
+    logger.info(
+        f"🗑 Подтверждение удаления лимита: {category_name} от пользователя {user_id}"
+    )
 
     limits = get_user_state_db(user_id).get("limits", {})
     category_id = None
@@ -2329,26 +2416,40 @@ def confirm_delete_limit(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "delete_limit"
-    and message.text == "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "delete_limit"
+        and message.text == "❌ Отмена"
+    )
 )
 def delete_limit_cancel(message):
-    delete_user_state_db(message.from_user.id)
+    user_id = message.from_user.id
+    logger.info(f"❌ Отмена удаления лимита от пользователя {user_id}")
+    delete_user_state_db(user_id)
     bot.send_message(
         message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
     )
 
 
-# --- НАПОМИНАНИЯ (ИСПРАВЛЕНО) ---
+# ============================================
+# ========== НАПОМИНАНИЯ ============
+# ============================================
+
+
 @bot.message_handler(func=lambda message: message.text == "⏰ Напоминания о платежах")
 def reminders_handler(message):
     user_id = message.from_user.id
-    if not get_user_family_db(user_id):
+    logger.info(f"⏰ Напоминания от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+    if not family_id:
         bot.send_message(
             message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
         )
         return
+
     bot.send_message(
         message.chat.id,
         "📌 **Управление напоминаниями о платежах**\n\nЗдесь вы можете настроить автоматические напоминания о регулярных платежах.",
@@ -2360,6 +2461,17 @@ def reminders_handler(message):
 @bot.message_handler(func=lambda message: message.text == "➕ Добавить напоминание")
 def add_reminder_start(message):
     user_id = message.from_user.id
+    logger.info(f"➕ Добавить напоминание от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+    if not family_id:
+        bot.send_message(
+            message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
+        )
+        return
+
     save_user_state_db(user_id, {"action": "add_reminder"})
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add(
@@ -2371,13 +2483,17 @@ def add_reminder_start(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text in ["💰 Расход", "📈 Доход"]
-    and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+    func=lambda message: (
+        message.text in ["💰 Расход", "📈 Доход"]
+        and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+    )
 )
 def add_reminder_type(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     trans_type = "expense" if message.text == "💰 Расход" else "income"
+    logger.info(f"📌 Выбран тип напоминания: {message.text} от пользователя {user_id}")
+
     state["reminder_type"] = trans_type
     save_user_state_db(user_id, state)
 
@@ -2405,14 +2521,20 @@ def add_reminder_type(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "add_reminder_category"
-    and message.text != "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action")
+        == "add_reminder_category"
+        and message.text != "❌ Отмена"
+    )
 )
 def add_reminder_category(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_category = message.text.strip()
+    logger.info(
+        f"📌 Выбрана категория для напоминания: {selected_category} от пользователя {user_id}"
+    )
 
     categories = state.get("categories", [])
     category = None
@@ -2455,12 +2577,17 @@ def add_reminder_category(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    and get_user_state_db(message.from_user.id).get("action") == "add_reminder_category"
-    and message.text == "❌ Отмена"
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action")
+        == "add_reminder_category"
+        and message.text == "❌ Отмена"
+    )
 )
 def add_reminder_category_cancel(message):
-    delete_user_state_db(message.from_user.id)
+    user_id = message.from_user.id
+    logger.info(f"❌ Отмена добавления напоминания от пользователя {user_id}")
+    delete_user_state_db(user_id)
     bot.send_message(
         message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
     )
@@ -2468,18 +2595,23 @@ def add_reminder_category_cancel(message):
 
 def add_reminder_title(message):
     user_id = message.from_user.id
+
     if message.text == "❌ Отмена":
+        logger.info(f"❌ Отмена добавления напоминания от пользователя {user_id}")
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
         )
         return
+
     state = get_user_state_db(user_id)
     if not state or state.get("action") != "add_reminder":
+        logger.warning(f"⚠️ Неверное состояние при добавлении напоминания: {state}")
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
         return
+
     state["reminder_title"] = message.text
     save_user_state_db(user_id, state)
     msg = bot.send_message(message.chat.id, "Введите сумму платежа (цифрами):")
@@ -2489,11 +2621,13 @@ def add_reminder_title(message):
 def add_reminder_amount(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
+
     if not state or state.get("action") != "add_reminder":
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
         return
+
     try:
         amount = float(message.text.replace(",", "."))
         if amount <= 0:
@@ -2502,6 +2636,7 @@ def add_reminder_amount(message):
         msg = bot.send_message(message.chat.id, "❌ Введите положительное число:")
         bot.register_next_step_handler(msg, add_reminder_amount)
         return
+
     state["reminder_amount"] = amount
     save_user_state_db(user_id, state)
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -2514,20 +2649,26 @@ def add_reminder_amount(message):
 
 
 @bot.message_handler(
-    func=lambda message: message.text in ["📅 Ежемесячно", "📆 Еженедельно"]
-    and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+    func=lambda message: (
+        message.text in ["📅 Ежемесячно", "📆 Еженедельно"]
+        and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+    )
 )
 def add_reminder_frequency(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
+    logger.info(f"📌 Выбрана периодичность: {message.text} от пользователя {user_id}")
+
     if not state or state.get("action") != "add_reminder":
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
         return
+
     frequency = "monthly" if message.text == "📅 Ежемесячно" else "weekly"
     state["reminder_frequency"] = frequency
     save_user_state_db(user_id, state)
+
     if frequency == "monthly":
         msg = bot.send_message(
             message.chat.id,
@@ -2553,6 +2694,7 @@ def add_reminder_frequency(message):
 
 def add_reminder_day_of_month(message):
     user_id = message.from_user.id
+
     try:
         day = int(message.text)
         if day < 1 or day > 31:
@@ -2561,30 +2703,33 @@ def add_reminder_day_of_month(message):
         msg = bot.send_message(message.chat.id, "❌ Введите число от 1 до 31:")
         bot.register_next_step_handler(msg, add_reminder_day_of_month)
         return
+
     state = get_user_state_db(user_id)
     if not state or state.get("action") != "add_reminder":
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
         return
+
     state["reminder_day"] = day
     save_user_state_db(user_id, state)
-    # Показываем меню выбора дней напоминания
     ask_notify_days(message)
 
 
 @bot.message_handler(
-    func=lambda message: message.text
-    in [
-        "Понедельник",
-        "Вторник",
-        "Среда",
-        "Четверг",
-        "Пятница",
-        "Суббота",
-        "Воскресенье",
-    ]
-    and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+    func=lambda message: (
+        message.text
+        in [
+            "Понедельник",
+            "Вторник",
+            "Среда",
+            "Четверг",
+            "Пятница",
+            "Суббота",
+            "Воскресенье",
+        ]
+        and get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+    )
 )
 def add_reminder_day_of_week(message):
     user_id = message.from_user.id
@@ -2597,24 +2742,24 @@ def add_reminder_day_of_week(message):
         "Суббота": 5,
         "Воскресенье": 6,
     }
+
     state = get_user_state_db(user_id)
     if not state or state.get("action") != "add_reminder":
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
         return
+
     state["reminder_day"] = days_map[message.text]
     save_user_state_db(user_id, state)
-    # Показываем меню выбора дней напоминания
     ask_notify_days(message)
 
 
 def ask_notify_days(message):
-    """Показывает меню выбора дней для напоминания - ИСПРАВЛЕНО"""
     user_id = message.from_user.id
-
-    # Убеждаемся, что состояние не сбросилось
     state = get_user_state_db(user_id)
+    logger.info(f"🔔 Запрос дней напоминания от пользователя {user_id}")
+
     if not state or state.get("action") != "add_reminder":
         bot.send_message(
             message.chat.id,
@@ -2623,7 +2768,7 @@ def ask_notify_days(message):
         )
         return
 
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(
         types.KeyboardButton("1 день"),
         types.KeyboardButton("2 дня"),
@@ -2631,7 +2776,6 @@ def ask_notify_days(message):
     )
     markup.row(types.KeyboardButton("Не напоминать"), types.KeyboardButton("❌ Отмена"))
 
-    # Сохраняем состояние с явным указанием, что мы ждем выбор дней
     state["waiting_for"] = "notify_days"
     save_user_state_db(user_id, state)
 
@@ -2641,38 +2785,21 @@ def ask_notify_days(message):
 
 
 @bot.message_handler(
-    func=lambda message: get_user_state_db(message.from_user.id).get("action")
-    == "add_reminder"
-    and get_user_state_db(message.from_user.id).get("waiting_for") == "notify_days"
+    func=lambda message: (
+        get_user_state_db(message.from_user.id).get("action") == "add_reminder"
+        and get_user_state_db(message.from_user.id).get("waiting_for") == "notify_days"
+        and message.text in ["1 день", "2 дня", "3 дня", "Не напоминать", "❌ Отмена"]
+    )
 )
 def add_reminder_notify_days(message):
     user_id = message.from_user.id
     text = message.text
-
-    logging.info(f"🔍 Выбор дней для напоминания: {text}")
+    logger.info(f"🔔 Выбор дней: {text} от пользователя {user_id}")
 
     if text == "❌ Отмена":
         delete_user_state_db(user_id)
         bot.send_message(
             message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
-        )
-        return
-
-    # Проверяем, что текст - это одна из допустимых кнопок
-    if text not in ["1 день", "2 дня", "3 дня", "Не напоминать"]:
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-        markup.row(
-            types.KeyboardButton("1 день"),
-            types.KeyboardButton("2 дня"),
-            types.KeyboardButton("3 дня"),
-        )
-        markup.row(
-            types.KeyboardButton("Не напоминать"), types.KeyboardButton("❌ Отмена")
-        )
-        bot.send_message(
-            message.chat.id,
-            "Пожалуйста, выберите один из вариантов:",
-            reply_markup=markup,
         )
         return
 
@@ -2729,9 +2856,12 @@ def add_reminder_notify_days(message):
 @bot.message_handler(func=lambda message: message.text == "📋 Список напоминаний")
 def list_reminders(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"📋 Список напоминаний от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
+
     reminders = get_reminders_db(family_id)
     if not reminders:
         bot.send_message(
@@ -2740,10 +2870,12 @@ def list_reminders(message):
             reply_markup=get_reminders_menu(),
         )
         return
+
     response = "📋 **Ваши напоминания:**\n\n"
     for i, r in enumerate(reminders, 1):
         freq = "Ежемесячно" if r["frequency"] == "monthly" else "Еженедельно"
         response += f"{i}. *{r['title']}*\n   💰 {r['amount']:.2f} руб. | {freq}\n"
+
     bot.send_message(
         message.chat.id,
         response,
@@ -2755,9 +2887,12 @@ def list_reminders(message):
 @bot.message_handler(func=lambda message: message.text == "🗑 Удалить напоминание")
 def delete_reminder_start(message):
     user_id = message.from_user.id
-    family_id = get_user_family_db(user_id)
+    logger.info(f"🗑 Удалить напоминание от пользователя {user_id}")
+
+    family_id = clear_state_and_check_family(message)
     if not family_id:
         return
+
     reminders = get_reminders_db(family_id)
     if not reminders:
         bot.send_message(
@@ -2766,10 +2901,12 @@ def delete_reminder_start(message):
             reply_markup=get_reminders_menu(),
         )
         return
+
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for i, r in enumerate(reminders, 1):
         markup.add(types.KeyboardButton(f"{i}. {r['title']}"))
     markup.add(types.KeyboardButton("❌ Отмена"))
+
     msg = bot.send_message(
         message.chat.id, "Выберите напоминание для удаления:", reply_markup=markup
     )
@@ -2777,16 +2914,23 @@ def delete_reminder_start(message):
 
 
 def delete_reminder_confirm(message):
+    user_id = message.from_user.id
+
     if message.text == "❌ Отмена":
+        logger.info(f"❌ Отмена удаления напоминания от пользователя {user_id}")
         bot.send_message(
             message.chat.id, "Удаление отменено.", reply_markup=get_main_menu()
         )
         return
-    user_id = message.from_user.id
+
     family_id = get_user_family_db(user_id)
     reminders = get_reminders_db(family_id)
+
     try:
         index = int(message.text.split(".")[0]) - 1
+        logger.info(
+            f"🗑 Удаление напоминания {reminders[index]['title']} от пользователя {user_id}"
+        )
         delete_reminder_db(reminders[index]["id"])
         load_data_to_memory()
         bot.send_message(
@@ -2794,7 +2938,8 @@ def delete_reminder_confirm(message):
             f"✅ Напоминание '{reminders[index]['title']}' удалено.",
             reply_markup=get_main_menu(),
         )
-    except:
+    except Exception as e:
+        logger.error(f"❌ Ошибка при удалении напоминания: {e}", exc_info=True)
         bot.send_message(
             message.chat.id, "Ошибка при удалении.", reply_markup=get_main_menu()
         )
@@ -2802,12 +2947,19 @@ def delete_reminder_confirm(message):
 
 @bot.message_handler(func=lambda message: message.text == "🔙 Назад в главное меню")
 def back_to_main(message):
+    user_id = message.from_user.id
+    logger.info(f"🔙 Назад в главное меню от пользователя {user_id}")
+    delete_user_state_db(user_id)
     bot.send_message(
         message.chat.id, "Возвращаемся в главное меню.", reply_markup=get_main_menu()
     )
 
 
-# --- ФОННЫЙ ПОТОК ДЛЯ ПРОВЕРКИ НАПОМИНАНИЙ ---
+# ============================================
+# ========== ФОННЫЙ ПОТОК ДЛЯ ПРОВЕРКИ НАПОМИНАНИЙ ============
+# ============================================
+
+
 def check_reminders():
     while True:
         try:
@@ -2835,39 +2987,42 @@ def check_reminders():
                         )
                         conn.commit()
                     except Exception as e:
-                        logging.error(f"Ошибка отправки уведомления: {e}")
+                        logger.error(f"❌ Ошибка отправки уведомления: {e}")
         except Exception as e:
-            logging.error(f"Ошибка в проверке напоминаний: {e}")
+            logger.error(f"❌ Ошибка в проверке напоминаний: {e}", exc_info=True)
         time.sleep(1800)
 
 
 def run_reminder_checker():
     reminder_thread = threading.Thread(target=check_reminders, daemon=True)
     reminder_thread.start()
+    logger.info("✅ Планировщик напоминаний запущен")
 
 
-# --- ЗАПУСК БОТА ---
+# ============================================
+# ========== ЗАПУСК БОТА ============
+# ============================================
+
 if __name__ == "__main__":
-    print("🤖 Инициализация бота...")
+    logger.info("🤖 Инициализация бота...")
     init_db()
     load_data_to_memory()
 
     try:
         bot.delete_webhook()
-        print("✅ Webhook удалён (если был)")
-    except:
-        pass
+        logger.info("✅ Webhook удалён (если был)")
+    except Exception as e:
+        logger.warning(f"⚠️ Webhook удаление: {e}")
 
-    print("🤖 Бот запущен и готов к работе на Bothost!")
-    print("💰 Семейный бюджет бот активен")
-    print(f"💾 Данные сохраняются в {DB_NAME}")
+    logger.info("🤖 Бот запущен и готов к работе на Bothost!")
+    logger.info("💰 Семейный бюджет бот активен")
+    logger.info(f"💾 Данные сохраняются в {DB_NAME}")
 
     run_reminder_checker()
-    print("✅ Планировщик напоминаний запущен")
 
     try:
         bot.infinity_polling()
     except KeyboardInterrupt:
-        print("\n👋 Бот остановлен пользователем")
+        logger.info("👋 Бот остановлен пользователем")
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        logger.error(f"❌ Ошибка: {e}", exc_info=True)
