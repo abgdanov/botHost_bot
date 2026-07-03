@@ -9,6 +9,7 @@ import sqlite3
 import json
 import os
 import sys
+import re
 from contextlib import contextmanager
 
 from emoji_dict import get_emoji
@@ -548,39 +549,6 @@ def get_categories_db(family_id, category_type=None, parent_id=None):
         return [dict(row) for row in cursor.fetchall()]
 
 
-def get_all_categories_with_hierarchy(family_id, category_type):
-    """Возвращает все категории с иерархией для отображения"""
-    result = []
-    parent_categories = get_categories_db(family_id, category_type, parent_id=None)
-
-    for parent in parent_categories:
-        result.append(
-            {
-                "id": parent["id"],
-                "name": parent["name"],
-                "level": 0,
-                "parent_id": None,
-                "is_parent": True,
-            }
-        )
-
-        subcategories = get_categories_db(
-            family_id, category_type, parent_id=parent["id"]
-        )
-        for sub in subcategories:
-            result.append(
-                {
-                    "id": sub["id"],
-                    "name": f"  └─ {sub['name']}",
-                    "level": 1,
-                    "parent_id": parent["id"],
-                    "is_parent": False,
-                }
-            )
-
-    return result
-
-
 def get_category_by_id(category_id):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -721,6 +689,45 @@ def check_budget_limits(family_id, category_id):
                 warnings.append(warning)
 
     return warnings
+
+
+def extract_emoji_from_name(name):
+    """Извлекает эмодзи из начала названия категории"""
+    if not name:
+        return None, name
+
+    first_char = name[0]
+    emoji_ranges = [
+        (0x1F600, 0x1F64F),
+        (0x1F300, 0x1F5FF),
+        (0x1F680, 0x1F6FF),
+        (0x2600, 0x26FF),
+        (0x2700, 0x27BF),
+    ]
+    code = ord(first_char)
+    for start, end in emoji_ranges:
+        if start <= code <= end:
+            return first_char, name[1:].strip()
+
+    return None, name
+
+
+def get_category_display_name(category_name, default_emoji="📁"):
+    """Возвращает имя категории с эмодзи для отображения"""
+    emoji, clean_name = extract_emoji_from_name(category_name)
+    if emoji:
+        return f"{emoji} {clean_name}"
+    else:
+        return f"{default_emoji} {category_name}"
+
+
+def get_parent_display_name(category_name):
+    """Возвращает имя для кнопки 'На всю категорию'"""
+    emoji, clean_name = extract_emoji_from_name(category_name)
+    if emoji:
+        return f"➡️ На всю категорию {emoji} {clean_name}"
+    else:
+        return f"➡️ На всю категорию 📁 {category_name}"
 
 
 def get_main_menu():
@@ -1411,7 +1418,7 @@ def list_categories(message):
 
 
 # ============================================
-# ========== УЧЕТ РАСХОДОВ И ДОХОДОВ ============
+# ========== УЧЕТ РАСХОДОВ И ДОХОДОВ (ЕДИНЫЙ ХЕНДЛЕР) ============
 # ============================================
 
 
@@ -1471,21 +1478,86 @@ def handle_menu(message):
     func=lambda message: (
         message.text
         and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
-        and message.text != "❌ Отмена"
     )
 )
+def handle_transaction_messages(message):
+    """Единый хендлер для всех сообщений при добавлении транзакции"""
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    text = message.text
+
+    logger.info(
+        f"🔍 Обработка сообщения: '{text}' от пользователя {user_id}, waiting_for={state.get('waiting_for')}"
+    )
+
+    # ====== ЭТАП 1: Если мы в процессе выбора подкатегории ======
+    if state.get("waiting_for") == "subcategory":
+        # Специальные кнопки
+        if text == "❌ Отмена":
+            logger.info(f"❌ Отмена выбора подкатегории от пользователя {user_id}")
+            delete_user_state_db(user_id)
+            bot.send_message(
+                message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+            )
+            return
+
+        if text == "➡️ Без подкатегории":
+            logger.info(f"➡️ Выбрано 'Без подкатегории' от пользователя {user_id}")
+            if (
+                "selected_category_id" not in state
+                or "selected_category_name" not in state
+            ):
+                bot.send_message(
+                    message.chat.id,
+                    "❌ Ошибка: данные потеряны. Начните заново.",
+                    reply_markup=get_main_menu(),
+                )
+                delete_user_state_db(user_id)
+                return
+
+            state["category_id"] = state["selected_category_id"]
+            state["category_name"] = state["selected_category_name"]
+            state["subcategory"] = None
+            state["action"] = "add_transaction"
+            if "waiting_for" in state:
+                del state["waiting_for"]
+            save_user_state_db(user_id, state)
+
+            msg = bot.send_message(
+                message.chat.id,
+                f"Вы выбрали: *{state['category_name']}*.\nВведите сумму цифрами:",
+                parse_mode="Markdown",
+                reply_markup=types.ReplyKeyboardRemove(),
+            )
+            bot.register_next_step_handler(msg, handle_amount)
+            return
+
+        # Обычный выбор подкатегории
+        logger.info(f"📌 Обработка выбора подкатегории: '{text}'")
+        handle_subcategory_selection(message)
+        return
+
+    # ====== ЭТАП 2: Выбор родительской категории ======
+    # Проверяем, не является ли текст специальной кнопкой
+    if text == "❌ Отмена":
+        logger.info(f"❌ Отмена выбора категории от пользователя {user_id}")
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+        )
+        return
+
+    handle_category_selection(message)
+
+
 def handle_category_selection(message):
+    """Обработка выбора родительской категории"""
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_label = message.text.strip()
     logger.info(f"🔍 Выбрана категория: {selected_label} от пользователя {user_id}")
 
     family_id = get_user_family_db(user_id)
-
-    if "selected_category_id" in state:
-        logger.info("📌 Это выбор ПОДКАТЕГОРИИ, перенаправляем...")
-        handle_subcategory_selection(message)
-        return
 
     categories = state.get("categories", [])
     category = None
@@ -1573,66 +1645,11 @@ def handle_category_selection(message):
         bot.register_next_step_handler(msg, handle_amount)
 
 
-@bot.message_handler(
-    func=lambda message: (
-        get_user_state_db(message.from_user.id).get("action") == "add_transaction"
-        and get_user_state_db(message.from_user.id).get("waiting_for") == "subcategory"
-        and message.text in ["➡️ Без подкатегории", "❌ Отмена"]
-    )
-)
-def handle_subcategory_special(message):
-    user_id = message.from_user.id
-    state = get_user_state_db(user_id)
-    logger.info(f"🔍 СПЕЦИАЛЬНАЯ КНОПКА: {message.text} от пользователя {user_id}")
-
-    if message.text == "❌ Отмена":
-        delete_user_state_db(user_id)
-        bot.send_message(
-            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
-        )
-        return
-
-    if message.text == "➡️ Без подкатегории":
-        if "selected_category_id" not in state or "selected_category_name" not in state:
-            bot.send_message(
-                message.chat.id,
-                "❌ Ошибка: данные потеряны. Начните заново.",
-                reply_markup=get_main_menu(),
-            )
-            delete_user_state_db(user_id)
-            return
-
-        state["category_id"] = state["selected_category_id"]
-        state["category_name"] = state["selected_category_name"]
-        state["subcategory"] = None
-        state["action"] = "add_transaction"
-        if "waiting_for" in state:
-            del state["waiting_for"]
-        save_user_state_db(user_id, state)
-
-        msg = bot.send_message(
-            message.chat.id,
-            f"Вы выбрали: *{state['category_name']}*.\nВведите сумму цифрами:",
-            parse_mode="Markdown",
-            reply_markup=types.ReplyKeyboardRemove(),
-        )
-        bot.register_next_step_handler(msg, handle_amount)
-
-
-@bot.message_handler(
-    func=lambda message: (
-        get_user_state_db(message.from_user.id).get("action") == "add_transaction"
-        and get_user_state_db(message.from_user.id).get("waiting_for") == "subcategory"
-        and message.text not in ["➡️ Без подкатегории", "❌ Отмена"]
-    )
-)
 def handle_subcategory_selection(message):
+    """Обработка выбора подкатегории"""
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_subcategory = message.text
-
-    if selected_subcategory in ["➡️ Без подкатегории", "❌ Отмена"]:
-        return
 
     logger.info(
         f"🔍 Выбрана подкатегория: '{selected_subcategory}' от пользователя {user_id}"
@@ -2333,7 +2350,7 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
 
 
 # ============================================
-# ========== БЮДЖЕТНЫЕ ЛИМИТЫ (ИСПРАВЛЕНО) ============
+# ========== БЮДЖЕТНЫЕ ЛИМИТЫ (ДВУХУРОВНЕВОЕ МЕНЮ) ============
 # ============================================
 
 
@@ -2360,7 +2377,7 @@ def budget_limits_handler(message):
 
 
 @bot.message_handler(func=lambda message: message.text == "📝 Установить лимит")
-def set_limit_category(message):
+def set_limit_start(message):
     user_id = message.from_user.id
     logger.info(f"📝 Установить лимит от пользователя {user_id}")
 
@@ -2368,9 +2385,10 @@ def set_limit_category(message):
     if not family_id:
         return
 
-    all_categories = get_all_categories_with_hierarchy(family_id, "expense")
+    # Получаем ТОЛЬКО родительские категории расходов
+    parent_categories = get_categories_db(family_id, "expense", parent_id=None)
 
-    if not all_categories:
+    if not parent_categories:
         bot.send_message(
             message.chat.id,
             "Нет категорий для установки лимита. Сначала создайте категорию расходов.",
@@ -2379,19 +2397,26 @@ def set_limit_category(message):
         return
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    for cat in all_categories:
-        markup.add(types.KeyboardButton(cat["name"]))
+    for cat in parent_categories:
+        display_name = get_category_display_name(cat["name"])
+        markup.add(types.KeyboardButton(display_name))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
     save_user_state_db(
-        user_id, {"action": "set_limit", "all_categories": all_categories}
+        user_id,
+        {
+            "action": "set_limit",
+            "stage": "selecting_parent",
+            "parent_categories": parent_categories,
+        },
     )
 
     bot.send_message(
         message.chat.id,
-        "Выберите категорию для установки лимита:\n\n"
-        "📁 - родительская категория (включает все подкатегории)\n"
-        "  └─ - подкатегория (только для неё)",
+        "📌 **Выберите категорию для установки лимита:**\n\n"
+        "Выберите родительскую категорию, затем укажете:\n"
+        "• На всю категорию (с учётом всех подкатегорий)\n"
+        "• Или на конкретную подкатегорию",
         reply_markup=markup,
     )
 
@@ -2400,36 +2425,40 @@ def set_limit_category(message):
     func=lambda message: (
         message.text
         and get_user_state_db(message.from_user.id).get("action") == "set_limit"
+        and get_user_state_db(message.from_user.id).get("stage") == "selecting_parent"
         and message.text != "❌ Отмена"
     )
 )
-def set_limit_amount(message):
+def set_limit_parent_selected(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
-    selected_category = message.text.strip()
+    selected_display = message.text.strip()
     logger.info(
-        f"📌 Выбрана категория для лимита: {selected_category} от пользователя {user_id}"
+        f"📌 Выбрана родительская категория: {selected_display} от пользователя {user_id}"
     )
 
-    all_categories = state.get("all_categories", [])
-    category = None
+    parent_categories = state.get("parent_categories", [])
 
-    # Ищем категорию по имени (учитывая отступы)
-    for cat in all_categories:
-        if cat["name"] == selected_category:
-            category = cat
+    # Ищем родительскую категорию по отображаемому имени
+    parent_category = None
+    for cat in parent_categories:
+        display_name = get_category_display_name(cat["name"])
+        if display_name == selected_display:
+            parent_category = cat
             break
 
-    # Если не нашли, пробуем без учета отступов
-    if not category:
-        clean_sel = selected_category.replace("  └─ ", "").strip()
-        for cat in all_categories:
-            clean_cat = cat["name"].replace("  └─ ", "").strip()
-            if clean_cat == clean_sel:
-                category = cat
+    # Если не нашли, пробуем по чистому имени
+    if not parent_category:
+        # Убираем эмодзи из выбранного
+        _, clean_selected = extract_emoji_from_name(selected_display)
+        for cat in parent_categories:
+            _, clean_cat = extract_emoji_from_name(cat["name"])
+            if clean_cat == clean_selected:
+                parent_category = cat
                 break
 
-    if not category:
+    if not parent_category:
+        logger.error(f"❌ Родительская категория не найдена: {selected_display}")
         bot.send_message(
             message.chat.id,
             "❌ Категория не найдена. Попробуйте еще раз.",
@@ -2438,66 +2467,70 @@ def set_limit_amount(message):
         delete_user_state_db(user_id)
         return
 
-    state["category_id"] = category["id"]
-    state["category_name"] = category["name"].replace("  └─ ", "").strip()
-    state["is_parent"] = category.get("is_parent", False)
-    save_user_state_db(user_id, state)
-
-    category_type = "родительскую" if state["is_parent"] else "подкатегорию"
-    msg = bot.send_message(
-        message.chat.id,
-        f"Введите лимит для {category_type} категории *{state['category_name']}* (в рублях):\n"
-        f"Например: 15000",
-        parse_mode="Markdown",
-        reply_markup=types.ReplyKeyboardRemove(),
+    logger.info(
+        f"✅ Найдена родительская категория: {parent_category['name']} (id={parent_category['id']})"
     )
-    bot.register_next_step_handler(msg, save_limit_amount)
-
-
-def save_limit_amount(message):
-    user_id = message.from_user.id
-    state = get_user_state_db(user_id)
-    logger.info(f"💰 Ввод лимита: {message.text} от пользователя {user_id}")
-
-    if not state or state.get("action") != "set_limit":
-        bot.send_message(
-            message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
-        )
-        return
-
-    try:
-        limit = float(message.text.replace(",", "."))
-        if limit <= 0:
-            raise ValueError
-    except ValueError:
-        msg = bot.send_message(message.chat.id, "❌ Введите положительное число:")
-        bot.register_next_step_handler(msg, save_limit_amount)
-        return
 
     family_id = get_user_family_db(user_id)
-    category_id = state["category_id"]
-    category_name = state["category_name"]
-    is_parent = state.get("is_parent", False)
 
-    set_budget_limit_db(family_id, category_id, limit)
-    load_data_to_memory()
-    delete_user_state_db(user_id)
+    # Проверяем наличие подкатегорий
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, name FROM categories WHERE parent_id = ? AND family_id = ?",
+            (parent_category["id"], family_id),
+        )
+        subcategories = [dict(row) for row in cursor.fetchall()]
 
-    category_type = "родительскую" if is_parent else "подкатегорию"
-    if is_parent:
-        subcats = get_categories_db(family_id, "expense", parent_id=category_id)
-        subcat_names = ", ".join([sub["name"] for sub in subcats]) if subcats else "нет"
-        extra_info = f"\n📁 Включает подкатегории: {subcat_names}"
-    else:
-        extra_info = ""
+    logger.info(f"📂 Найдено подкатегорий: {len(subcategories)}")
+
+    if not subcategories:
+        # Нет подкатегорий - сразу устанавливаем лимит на родителя
+        state["selected_category"] = {
+            "id": parent_category["id"],
+            "name": parent_category["name"],
+            "is_parent": True,
+        }
+        state["stage"] = "entering_amount"
+        state["action"] = "set_limit"
+        save_user_state_db(user_id, state)
+
+        display_name = get_category_display_name(parent_category["name"])
+        msg = bot.send_message(
+            message.chat.id,
+            f"Введите лимит для категории {display_name} (в рублях):\n"
+            f"Например: 15000",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        bot.register_next_step_handler(msg, set_limit_amount)
+        return
+
+    # Есть подкатегории - показываем выбор
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+
+    # Кнопка "На всю категорию"
+    parent_display = get_parent_display_name(parent_category["name"])
+    markup.add(types.KeyboardButton(parent_display))
+
+    # Подкатегории
+    for sub in subcategories:
+        display_name = get_category_display_name(sub["name"])
+        markup.add(types.KeyboardButton(display_name))
+
+    markup.add(types.KeyboardButton("❌ Отмена"))
+
+    state["parent_category"] = parent_category
+    state["subcategories"] = subcategories
+    state["stage"] = "selecting_subcategory"
+    state["action"] = "set_limit"
+    save_user_state_db(user_id, state)
 
     bot.send_message(
         message.chat.id,
-        f"✅ **Лимит установлен!**\n\n"
-        f"📌 Категория: {category_name} ({category_type})\n"
-        f"💰 Лимит: {limit:.2f} руб.{extra_info}",
-        parse_mode="Markdown",
-        reply_markup=get_main_menu(),
+        f"📌 **Выберите, на что установить лимит для категории «{parent_category['name']}»:**\n\n"
+        f"➡️ На всю категорию — лимит будет учитывать ВСЕ расходы по категории и её подкатегориям\n"
+        f"📄 На конкретную подкатегорию — лимит только для неё",
+        reply_markup=markup,
     )
 
 
@@ -2505,6 +2538,119 @@ def save_limit_amount(message):
     func=lambda message: (
         message.text
         and get_user_state_db(message.from_user.id).get("action") == "set_limit"
+        and get_user_state_db(message.from_user.id).get("stage")
+        == "selecting_subcategory"
+        and message.text != "❌ Отмена"
+    )
+)
+def set_limit_subcategory_selected(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    selected_text = message.text.strip()
+    logger.info(f"📌 Выбрано: {selected_text} от пользователя {user_id}")
+
+    parent_category = state.get("parent_category")
+    subcategories = state.get("subcategories", [])
+
+    selected_category = None
+    is_parent = False
+
+    # Проверяем, не выбрана ли "На всю категорию"
+    parent_display = get_parent_display_name(parent_category["name"])
+    if selected_text == parent_display:
+        # Выбрана вся категория
+        selected_category = {
+            "id": parent_category["id"],
+            "name": parent_category["name"],
+            "is_parent": True,
+        }
+        is_parent = True
+        logger.info(f"✅ Выбрана вся категория: {parent_category['name']}")
+    else:
+        # Ищем подкатегорию
+        for sub in subcategories:
+            display_name = get_category_display_name(sub["name"])
+            if display_name == selected_text:
+                selected_category = {
+                    "id": sub["id"],
+                    "name": sub["name"],
+                    "is_parent": False,
+                    "parent_id": parent_category["id"],
+                    "parent_name": parent_category["name"],
+                }
+                logger.info(f"✅ Выбрана подкатегория: {sub['name']}")
+                break
+
+        # Если не нашли, пробуем по чистому имени
+        if not selected_category:
+            _, clean_selected = extract_emoji_from_name(selected_text)
+            for sub in subcategories:
+                _, clean_sub = extract_emoji_from_name(sub["name"])
+                if clean_sub == clean_selected:
+                    selected_category = {
+                        "id": sub["id"],
+                        "name": sub["name"],
+                        "is_parent": False,
+                        "parent_id": parent_category["id"],
+                        "parent_name": parent_category["name"],
+                    }
+                    logger.info(
+                        f"✅ Найдена подкатегория по чистому имени: {sub['name']}"
+                    )
+                    break
+
+    if not selected_category:
+        logger.error(f"❌ Не удалось определить выбор: {selected_text}")
+        bot.send_message(
+            message.chat.id,
+            "❌ Ошибка: не удалось определить выбор. Попробуйте еще раз.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    state["selected_category"] = selected_category
+    state["stage"] = "entering_amount"
+    state["action"] = "set_limit"
+    save_user_state_db(user_id, state)
+
+    # Формируем сообщение для ввода суммы
+    if is_parent:
+        display_name = get_category_display_name(selected_category["name"])
+        amount_prompt = (
+            f"Введите лимит для категории {display_name} (включает все подкатегории):\n"
+            f"Например: 15000"
+        )
+    else:
+        display_name = get_category_display_name(selected_category["name"])
+        parent_display = get_category_display_name(parent_category["name"])
+        amount_prompt = (
+            f"Введите лимит для подкатегории {display_name} (категория {parent_display}):\n"
+            f"Например: 5000"
+        )
+
+    msg = bot.send_message(
+        message.chat.id,
+        amount_prompt,
+        reply_markup=types.ReplyKeyboardRemove(),
+    )
+    bot.register_next_step_handler(msg, set_limit_amount)
+
+
+@bot.message_handler(
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "set_limit"
+        and get_user_state_db(message.from_user.id).get("stage") == "selecting_parent"
+        and message.text == "❌ Отмена"
+    )
+)
+@bot.message_handler(
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action") == "set_limit"
+        and get_user_state_db(message.from_user.id).get("stage")
+        == "selecting_subcategory"
         and message.text == "❌ Отмена"
     )
 )
@@ -2514,6 +2660,70 @@ def set_limit_cancel(message):
     delete_user_state_db(user_id)
     bot.send_message(
         message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+    )
+
+
+def set_limit_amount(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    logger.info(f"💰 Ввод лимита: {message.text} от пользователя {user_id}")
+
+    if (
+        not state
+        or state.get("action") != "set_limit"
+        or state.get("stage") != "entering_amount"
+    ):
+        bot.send_message(
+            message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
+        )
+        delete_user_state_db(user_id)
+        return
+
+    try:
+        limit = float(message.text.replace(",", "."))
+        if limit <= 0:
+            raise ValueError
+    except ValueError:
+        msg = bot.send_message(message.chat.id, "❌ Введите положительное число:")
+        bot.register_next_step_handler(msg, set_limit_amount)
+        return
+
+    family_id = get_user_family_db(user_id)
+    selected_category = state["selected_category"]
+    category_id = selected_category["id"]
+    category_name = selected_category["name"]
+    is_parent = selected_category.get("is_parent", False)
+
+    set_budget_limit_db(family_id, category_id, limit)
+    load_data_to_memory()
+    delete_user_state_db(user_id)
+
+    # Формируем сообщение об успехе
+    display_name = get_category_display_name(category_name)
+    if is_parent:
+        subcats = get_categories_db(family_id, "expense", parent_id=category_id)
+        subcat_names = ", ".join([sub["name"] for sub in subcats]) if subcats else "нет"
+        success_msg = (
+            f"✅ **Лимит установлен!**\n\n"
+            f"📁 Категория: {display_name} (родительская)\n"
+            f"💰 Лимит: {limit:.2f} руб.\n"
+            f"📂 Включает подкатегории: {subcat_names}"
+        )
+    else:
+        parent_name = selected_category.get("parent_name", "")
+        parent_display = get_category_display_name(parent_name)
+        success_msg = (
+            f"✅ **Лимит установлен!**\n\n"
+            f"📄 Подкатегория: {display_name}\n"
+            f"📁 Родительская категория: {parent_display}\n"
+            f"💰 Лимит: {limit:.2f} руб."
+        )
+
+    bot.send_message(
+        message.chat.id,
+        success_msg,
+        parse_mode="Markdown",
+        reply_markup=get_main_menu(),
     )
 
 
@@ -2563,12 +2773,14 @@ def view_limits(message):
         category_info = get_category_by_id(category_id)
         is_parent = category_info["parent_id"] is None if category_info else True
 
+        display_name = get_category_display_name(category_name)
+
         if is_parent:
             subcats = get_categories_db(family_id, "expense", parent_id=category_id)
             subcat_names = (
                 ", ".join([sub["name"] for sub in subcats]) if subcats else "нет"
             )
-            response += f"📁 *{category_name}* (включает: {subcat_names})\n"
+            response += f"📁 *{display_name}* (включает: {subcat_names})\n"
         else:
             parent = (
                 get_category_by_id(category_info["parent_id"])
@@ -2576,7 +2788,8 @@ def view_limits(message):
                 else None
             )
             parent_name = parent["name"] if parent else ""
-            response += f"📄 *{category_name}* (подкатегория «{parent_name}»)\n"
+            parent_display = get_category_display_name(parent_name)
+            response += f"📄 *{display_name}* (подкатегория {parent_display})\n"
 
         response += f"  💰 Лимит: {limit:.2f} руб.\n"
         response += f"  💸 Потрачено: {current_expense:.2f} руб. ({percentage:.1f}%)\n"
@@ -2595,7 +2808,7 @@ def view_limits(message):
 
 
 @bot.message_handler(func=lambda message: message.text == "🗑 Удалить лимит")
-def delete_limit_category(message):
+def delete_limit_start(message):
     user_id = message.from_user.id
     logger.info(f"🗑 Удалить лимит от пользователя {user_id}")
 
@@ -2616,10 +2829,11 @@ def delete_limit_category(message):
     for category_id, data in limits.items():
         category_info = get_category_by_id(category_id)
         is_parent = category_info["parent_id"] is None if category_info else True
+        display_name = get_category_display_name(data["name"])
         if is_parent:
-            label = f"📁 {data['name']}"
+            label = f"📁 {display_name}"
         else:
-            label = f"📄 {data['name']}"
+            label = f"📄 {display_name}"
         markup.add(types.KeyboardButton(label))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
@@ -2639,16 +2853,19 @@ def delete_limit_category(message):
 def confirm_delete_limit(message):
     user_id = message.from_user.id
     selected_label = message.text
-    # Убираем эмодзи из названия
-    category_name = selected_label.replace("📁 ", "").replace("📄 ", "").strip()
+    # Убираем эмодзи и иконки из названия
+    selected_label = selected_label.replace("📁 ", "").replace("📄 ", "").strip()
+    _, clean_name = extract_emoji_from_name(selected_label)
+
     logger.info(
-        f"🗑 Подтверждение удаления лимита: {category_name} от пользователя {user_id}"
+        f"🗑 Подтверждение удаления лимита: {clean_name} от пользователя {user_id}"
     )
 
     limits = get_user_state_db(user_id).get("limits", {})
     category_id = None
     for cid, data in limits.items():
-        if data["name"] == category_name:
+        _, clean_cat = extract_emoji_from_name(data["name"])
+        if clean_cat == clean_name:
             category_id = cid
             break
 
@@ -2668,7 +2885,7 @@ def confirm_delete_limit(message):
 
     bot.send_message(
         message.chat.id,
-        f"✅ Лимит для категории '{category_name}' удален.",
+        f"✅ Лимит для категории удален.",
         reply_markup=get_main_menu(),
     )
 
@@ -2690,7 +2907,7 @@ def delete_limit_cancel(message):
 
 
 # ============================================
-# ========== НАПОМИНАНИЯ (С ПОДКАТЕГОРИЯМИ) ============
+# ========== НАПОМИНАНИЯ ============
 # ============================================
 
 
