@@ -215,6 +215,7 @@ def delete_transaction_db(transaction_id):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM transactions WHERE id = ?", (transaction_id,))
+        return cursor.rowcount > 0
 
 
 def get_category_name_by_id(category_id, family_id=None):
@@ -663,10 +664,52 @@ def get_categories_menu():
 
 def get_cancel_confirmation_menu():
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn1 = types.InlineKeyboardButton("❌ Удалить", callback_data="cancel_confirm_yes")
-    btn2 = types.InlineKeyboardButton("🔙 Отмена", callback_data="cancel_confirm_no")
+    btn1 = types.InlineKeyboardButton(
+        "❌ Да, удалить", callback_data="cancel_confirm_yes"
+    )
+    btn2 = types.InlineKeyboardButton(
+        "🔙 Нет, вернуться", callback_data="cancel_confirm_no"
+    )
     markup.add(btn1, btn2)
     return markup
+
+
+# ============================================
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
+# ============================================
+
+
+def format_transaction_date(date_value):
+    """Форматирует дату из БД в читаемый вид"""
+    try:
+        if isinstance(date_value, datetime):
+            return date_value.strftime("%d.%m.%Y %H:%M")
+        elif isinstance(date_value, str):
+            for fmt in ["%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
+                try:
+                    dt = datetime.strptime(date_value, fmt)
+                    return dt.strftime("%d.%m.%Y %H:%M")
+                except ValueError:
+                    continue
+            return date_value
+        else:
+            return str(date_value)
+    except Exception as e:
+        logger.error(f"Ошибка форматирования даты: {e}")
+        return str(date_value)
+
+
+def clear_state_and_check_family(message):
+    user_id = message.from_user.id
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+    if not family_id:
+        bot.send_message(
+            message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
+        )
+        return None
+    return family_id
 
 
 # ============================================
@@ -772,24 +815,6 @@ def save_family_id(message):
         parse_mode="Markdown",
         reply_markup=get_main_menu(),
     )
-
-
-# ============================================
-# ========== ГЛАВНОЕ МЕНЮ ============
-# ============================================
-
-
-def clear_state_and_check_family(message):
-    user_id = message.from_user.id
-    delete_user_state_db(user_id)
-
-    family_id = get_user_family_db(user_id)
-    if not family_id:
-        bot.send_message(
-            message.chat.id, "Сначала войдите в семью!", reply_markup=get_auth_menu()
-        )
-        return None
-    return family_id
 
 
 # ============================================
@@ -1643,7 +1668,7 @@ def handle_amount(message):
 
 
 # ============================================
-# ========== ОТМЕНА ОПЕРАЦИИ ============
+# ========== ОТМЕНА ОПЕРАЦИИ (ИСПРАВЛЕНО) ============
 # ============================================
 
 
@@ -1665,25 +1690,39 @@ def cancel_last_transaction(message):
     if not last_trans:
         bot.send_message(
             message.chat.id,
-            "Вы еще не вносили никаких операций, отменять нечего! 🤷‍♂️",
+            "❌ Вы еще не вносили никаких операций, отменять нечего! 🤷‍♂️",
             reply_markup=get_main_menu(),
         )
         return
+
+    date_formatted = format_transaction_date(last_trans["date"])
+    category_emoji = get_category_emoji(last_trans["category_name"])
+
+    message_text = (
+        f"⚠️ **Вы уверены, что хотите удалить последнюю операцию?**\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 **Тип:** {last_trans['type']}\n"
+        f"💰 **Сумма:** `{last_trans['amount']:.2f} руб.`\n"
+        f"📅 **Дата:** {date_formatted}\n"
+        f"🏷️ **Категория:** {category_emoji} {last_trans['category_name']}\n"
+        f"👤 **Кто:** {last_trans['user_name']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Выберите действие:"
+    )
 
     save_user_state_db(
         user_id,
         {
             "action": "confirm_cancel",
             "transaction_id": last_trans["id"],
+            "transaction_data": {
+                "type": last_trans["type"],
+                "amount": last_trans["amount"],
+                "date": date_formatted,
+                "category": last_trans["category_name"],
+                "user": last_trans["user_name"],
+            },
         },
-    )
-
-    message_text = (
-        f"⚠️ **Подтверждение отмены**\n\n"
-        f"Вы действительно хотите отменить последнюю операцию?\n\n"
-        f"📌 {last_trans['type']} на сумму `{last_trans['amount']:.2f} руб.`\n"
-        f"📅 {last_trans['date'].strftime('%d.%m.%Y %H:%M')}\n"
-        f"🏷️ {last_trans['category_name']}"
     )
 
     bot.send_message(
@@ -1697,47 +1736,36 @@ def cancel_last_transaction(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("cancel_confirm_"))
 def handle_cancel_callback(call):
     user_id = call.from_user.id
-    state = get_user_state_db(user_id)
     logger.info(f"🔍 Callback отмены: {call.data} от пользователя {user_id}")
+
+    state = get_user_state_db(user_id)
+    if state.get("action") != "confirm_cancel":
+        logger.warning(f"⚠️ Пользователь {user_id} не в состоянии подтверждения")
+        bot.answer_callback_query(call.id, "Нет активной операции для отмены")
+        return
 
     try:
         if call.data == "cancel_confirm_no":
             logger.info(f"❌ Отмена операции отклонена пользователем {user_id}")
             delete_user_state_db(user_id)
+
             bot.edit_message_text(
-                "❌ Отмена операции отклонена.",
+                "✅ Операция сохранена. Возврат в главное меню.",
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
             )
+
             bot.send_message(
-                call.message.chat.id,
-                "Возвращаемся в главное меню.",
-                reply_markup=get_main_menu(),
+                call.message.chat.id, "Главное меню:", reply_markup=get_main_menu()
             )
             bot.answer_callback_query(call.id)
             return
 
         if call.data == "cancel_confirm_yes":
             transaction_id = state.get("transaction_id")
-            if transaction_id:
-                logger.info(
-                    f"✅ Удаление транзакции {transaction_id} пользователем {user_id}"
-                )
-                delete_transaction_db(transaction_id)
-                load_data_to_memory()
-                delete_user_state_db(user_id)
-                bot.edit_message_text(
-                    "✅ Операция успешно удалена!",
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
-                )
-                bot.send_message(
-                    call.message.chat.id,
-                    "Возвращаемся в главное меню.",
-                    reply_markup=get_main_menu(),
-                )
-            else:
-                logger.warning(f"⚠️ Транзакция не найдена для пользователя {user_id}")
+
+            if not transaction_id:
+                logger.error(f"❌ Не найден ID транзакции для пользователя {user_id}")
                 delete_user_state_db(user_id)
                 bot.edit_message_text(
                     "❌ Ошибка: операция не найдена.",
@@ -1745,16 +1773,76 @@ def handle_cancel_callback(call):
                     message_id=call.message.message_id,
                 )
                 bot.send_message(
+                    call.message.chat.id, "Главное меню:", reply_markup=get_main_menu()
+                )
+                bot.answer_callback_query(call.id, "Произошла ошибка")
+                return
+
+            try:
+                success = delete_transaction_db(transaction_id)
+                load_data_to_memory()
+
+                if success:
+                    logger.info(
+                        f"✅ Транзакция {transaction_id} удалена пользователем {user_id}"
+                    )
+                    trans_data = state.get("transaction_data", {})
+                    type_emoji = "📉" if trans_data.get("type") == "Расход" else "📈"
+
+                    success_text = (
+                        f"✅ **Операция успешно удалена!**\n\n"
+                        f"{type_emoji} {trans_data.get('type', '')}\n"
+                        f"💰 Сумма: `{trans_data.get('amount', 0):.2f} руб.`\n"
+                        f"🏷️ Категория: {trans_data.get('category', '')}\n"
+                        f"📅 Дата: {trans_data.get('date', '')}\n"
+                    )
+
+                    bot.edit_message_text(
+                        success_text,
+                        chat_id=call.message.chat.id,
+                        message_id=call.message.message_id,
+                        parse_mode="Markdown",
+                    )
+                else:
+                    bot.edit_message_text(
+                        "❌ Операция не найдена в базе данных.",
+                        chat_id=call.message.chat.id,
+                        message_id=call.message.message_id,
+                    )
+
+                delete_user_state_db(user_id)
+                bot.send_message(
                     call.message.chat.id,
-                    "Возвращаемся в главное меню.",
+                    "Возвращаемся в главное меню:",
                     reply_markup=get_main_menu(),
                 )
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка при удалении транзакции: {e}", exc_info=True)
+                bot.edit_message_text(
+                    "❌ Произошла ошибка при удалении. Попробуйте позже.",
+                    chat_id=call.message.chat.id,
+                    message_id=call.message.message_id,
+                )
+                bot.send_message(
+                    call.message.chat.id, "Главное меню:", reply_markup=get_main_menu()
+                )
+                delete_user_state_db(user_id)
+
             bot.answer_callback_query(call.id)
             return
+
     except Exception as e:
-        logger.error(f"❌ Ошибка в handle_cancel_callback: {e}", exc_info=True)
+        logger.error(
+            f"❌ Критическая ошибка в handle_cancel_callback: {e}", exc_info=True
+        )
         bot.answer_callback_query(call.id, "Произошла ошибка, попробуйте снова")
         delete_user_state_db(user_id)
+        bot.send_message(
+            call.message.chat.id,
+            "Произошла ошибка. Возврат в главное меню.",
+            reply_markup=get_main_menu(),
+        )
 
 
 # ============================================
@@ -2432,7 +2520,7 @@ def delete_limit_cancel(message):
 
 
 # ============================================
-# ========== НАПОМИНАНИЯ ============
+# ========== НАПОМИНАНИЯ (ИСПРАВЛЕНО) ============
 # ============================================
 
 
