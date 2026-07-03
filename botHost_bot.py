@@ -10,9 +10,21 @@ import json
 import os
 import sys
 import re
+import tempfile
 from contextlib import contextmanager
 
 from emoji_dict import get_emoji
+
+# Пытаемся импортировать openpyxl для экспорта в Excel
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    logging.warning("⚠️ openpyxl не установлен. Экспорт в Excel недоступен.")
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -293,7 +305,6 @@ def add_emoji_to_category_name(name):
 
 
 def extract_emoji_from_name(name):
-    """Извлекает эмодзи из начала названия"""
     if not name:
         return None, name
 
@@ -314,7 +325,6 @@ def extract_emoji_from_name(name):
 
 
 def get_category_display_clean(category_id):
-    """Возвращает название категории с одним эмодзи (без дублирования)"""
     full_name = get_category_full_name(category_id)
     if not full_name:
         return "❓ Без категории"
@@ -325,10 +335,8 @@ def get_category_display_clean(category_id):
     for part in parts:
         emoji, clean_name = extract_emoji_from_name(part)
         if emoji:
-            # Уже есть эмодзи - оставляем как есть
             result_parts.append(part)
         else:
-            # Нет эмодзи - добавляем
             new_emoji = get_category_emoji(part)
             if new_emoji and new_emoji != "📌":
                 result_parts.append(f"{new_emoji} {clean_name}")
@@ -339,7 +347,6 @@ def get_category_display_clean(category_id):
 
 
 def get_category_display_name(category_name):
-    """Возвращает имя категории с эмодзи для отображения"""
     emoji, clean_name = extract_emoji_from_name(category_name)
     if emoji:
         return f"{emoji} {clean_name}"
@@ -348,7 +355,6 @@ def get_category_display_name(category_name):
 
 
 def get_parent_display_name(category_name):
-    """Возвращает имя для кнопки 'На всю категорию'"""
     emoji, clean_name = extract_emoji_from_name(category_name)
     if emoji:
         return f"➡️ На всю категорию {emoji} {clean_name}"
@@ -848,6 +854,239 @@ def clear_state_and_check_family(message):
         )
         return None
     return family_id
+
+
+# ============================================
+# ========== ЭКСПОРТ В EXCEL ============
+# ============================================
+
+
+def create_excel_report(family_id, user_id, start_date, end_date, report_type):
+    """
+    Создает Excel файл с отчетом
+    """
+    if not OPENPYXL_AVAILABLE:
+        raise Exception("openpyxl не установлен. Установите: pip install openpyxl")
+
+    logger.info(
+        f"📊 Создание Excel отчета: family_id={family_id}, period={start_date}-{end_date}"
+    )
+
+    # Получаем транзакции
+    if report_type == "family":
+        transactions = get_transactions_db(
+            family_id, start_date=start_date, end_date=end_date
+        )
+    else:
+        transactions = get_transactions_db(
+            family_id, user_id=user_id, start_date=start_date, end_date=end_date
+        )
+
+    # Создаем книгу
+    wb = openpyxl.Workbook()
+
+    # Удаляем стандартный лист
+    wb.remove(wb.active)
+
+    # ===== ЛИСТ 1: ТРАНЗАКЦИИ =====
+    ws1 = wb.create_sheet("Транзакции")
+
+    # Заголовки
+    headers = ["Дата", "Тип", "Категория", "Сумма (руб.)", "Кто"]
+    for col, header in enumerate(headers, 1):
+        cell = ws1.cell(row=1, column=col, value=header)
+        cell.font = Font(bold=True, size=11)
+        cell.fill = PatternFill(
+            start_color="366092", end_color="366092", fill_type="solid"
+        )
+        cell.font = Font(bold=True, size=11, color="FFFFFF")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # Данные (сортируем от новых к старым)
+    sorted_trans = sorted(transactions, key=lambda x: x["date"], reverse=True)
+
+    for row, trans in enumerate(sorted_trans, 2):
+        date_str = (
+            trans["date"].strftime("%d.%m.%Y %H:%M")
+            if isinstance(trans["date"], datetime)
+            else str(trans["date"])
+        )
+        ws1.cell(row=row, column=1, value=date_str)
+        ws1.cell(row=row, column=2, value=trans["type"])
+        ws1.cell(row=row, column=3, value=get_category_full_name(trans["category_id"]))
+        ws1.cell(row=row, column=4, value=trans["amount"])
+        ws1.cell(row=row, column=5, value=trans["user_name"])
+
+        # Формат сумм
+        ws1.cell(row=row, column=4).number_format = "#,##0.00"
+
+        # Цвет для расходов/доходов
+        if trans["type"] == "Доход":
+            ws1.cell(row=row, column=4).font = Font(color="008000")
+        else:
+            ws1.cell(row=row, column=4).font = Font(color="FF0000")
+
+    # Ширина колонок
+    ws1.column_dimensions["A"].width = 18
+    ws1.column_dimensions["B"].width = 12
+    ws1.column_dimensions["C"].width = 40
+    ws1.column_dimensions["D"].width = 16
+    ws1.column_dimensions["E"].width = 20
+
+    # ===== ЛИСТ 2: ИТОГИ =====
+    ws2 = wb.create_sheet("Итоги")
+
+    # Заголовок
+    title_cell = ws2.cell(
+        row=1,
+        column=1,
+        value=f"ИТОГИ ЗА ПЕРИОД: {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}",
+    )
+    title_cell.font = Font(bold=True, size=14)
+    ws2.merge_cells("A1:C1")
+
+    # Общие итоги
+    total_income = sum(t["amount"] for t in transactions if t["type"] == "Доход")
+    total_expense = sum(t["amount"] for t in transactions if t["type"] == "Расход")
+    balance = total_income - total_expense
+
+    ws2.cell(row=3, column=1, value="ОБЩИЕ ИТОГИ:").font = Font(bold=True, size=12)
+
+    ws2.cell(row=4, column=1, value="Доходы:")
+    ws2.cell(row=4, column=2, value=total_income).number_format = "#,##0.00"
+    ws2.cell(row=4, column=2).font = Font(color="008000")
+
+    ws2.cell(row=5, column=1, value="Расходы:")
+    ws2.cell(row=5, column=2, value=total_expense).number_format = "#,##0.00"
+    ws2.cell(row=5, column=2).font = Font(color="FF0000")
+
+    ws2.cell(row=6, column=1, value="Баланс:")
+    ws2.cell(row=6, column=2, value=balance).number_format = "#,##0.00"
+    ws2.cell(row=6, column=2).font = Font(
+        bold=True, color="0000FF" if balance >= 0 else "FF0000"
+    )
+
+    # Расходы по категориям
+    row_offset = 9
+    ws2.cell(row=row_offset, column=1, value="РАСХОДЫ ПО КАТЕГОРИЯМ:").font = Font(
+        bold=True, size=12
+    )
+    row_offset += 1
+
+    expense_by_category = {}
+    for t in transactions:
+        if t["type"] == "Расход":
+            cat_name = get_category_full_name(t["category_id"])
+            if cat_name not in expense_by_category:
+                expense_by_category[cat_name] = 0
+            expense_by_category[cat_name] += t["amount"]
+
+    sorted_expenses = sorted(
+        expense_by_category.items(), key=lambda x: x[1], reverse=True
+    )
+
+    for cat_name, amount in sorted_expenses:
+        ws2.cell(row=row_offset, column=1, value=cat_name)
+        ws2.cell(row=row_offset, column=2, value=amount).number_format = "#,##0.00"
+        row_offset += 1
+
+    # Доходы по категориям
+    row_offset += 1
+    ws2.cell(row=row_offset, column=1, value="ДОХОДЫ ПО КАТЕГОРИЯМ:").font = Font(
+        bold=True, size=12
+    )
+    row_offset += 1
+
+    income_by_category = {}
+    for t in transactions:
+        if t["type"] == "Доход":
+            cat_name = get_category_full_name(t["category_id"])
+            if cat_name not in income_by_category:
+                income_by_category[cat_name] = 0
+            income_by_category[cat_name] += t["amount"]
+
+    sorted_income = sorted(income_by_category.items(), key=lambda x: x[1], reverse=True)
+
+    for cat_name, amount in sorted_income:
+        ws2.cell(row=row_offset, column=1, value=cat_name)
+        ws2.cell(row=row_offset, column=2, value=amount).number_format = "#,##0.00"
+        row_offset += 1
+
+    # Ширина колонок
+    ws2.column_dimensions["A"].width = 40
+    ws2.column_dimensions["B"].width = 20
+    ws2.column_dimensions["C"].width = 20
+
+    # ===== ЛИСТ 3: СТАТИСТИКА =====
+    ws3 = wb.create_sheet("Статистика")
+
+    days = (end_date - start_date).days + 1
+    avg_income = total_income / days if days > 0 else 0
+    avg_expense = total_expense / days if days > 0 else 0
+
+    ws3.cell(row=1, column=1, value="СТАТИСТИКА ЗА ПЕРИОД").font = Font(
+        bold=True, size=14
+    )
+    ws3.merge_cells("A1:C1")
+
+    stats = [
+        (
+            "Период:",
+            f"{start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}",
+        ),
+        ("Количество дней:", str(days)),
+        ("", ""),
+        ("СРЕДНИЕ ПОКАЗАТЕЛИ:", ""),
+        ("Траты в день:", f"{avg_expense:.2f} руб."),
+        ("Доходы в день:", f"{avg_income:.2f} руб."),
+        ("", ""),
+        ("ТОП-5 ТРАТ:", ""),
+    ]
+
+    row = 1
+    for label, value in stats:
+        row += 1
+        ws3.cell(row=row, column=1, value=label).font = (
+            Font(bold=True) if "ТОП-5" in label or "СРЕДНИЕ" in label else Font()
+        )
+        ws3.cell(row=row, column=2, value=value)
+
+    # Топ-5 трат
+    expenses_sorted = sorted(
+        [t for t in transactions if t["type"] == "Расход"],
+        key=lambda x: x["amount"],
+        reverse=True,
+    )
+    row += 1
+    for i, exp in enumerate(expenses_sorted[:5], 1):
+        row += 1
+        cat_name = get_category_full_name(exp["category_id"])
+        date_str = (
+            exp["date"].strftime("%d.%m.%Y")
+            if isinstance(exp["date"], datetime)
+            else str(exp["date"])
+        )
+        ws3.cell(row=row, column=1, value=f"{i}. {cat_name}")
+        ws3.cell(row=row, column=2, value=f"{exp['amount']:.2f} руб.")
+        ws3.cell(row=row, column=3, value=f"{date_str} ({exp['user_name']})")
+
+    ws3.column_dimensions["A"].width = 35
+    ws3.column_dimensions["B"].width = 20
+    ws3.column_dimensions["C"].width = 30
+
+    # Сохраняем во временный файл
+    timestamp = datetime.now().strftime("%d-%m-%Y__%H-%M")
+    period_str = f"{start_date.strftime('%d-%m-%Y')}__{end_date.strftime('%d-%m-%Y')}"
+    filename = f"family_report_{period_str}_{timestamp}.xlsx"
+
+    # Используем временную папку
+    temp_dir = tempfile.gettempdir()
+    filepath = os.path.join(temp_dir, filename)
+
+    wb.save(filepath)
+    logger.info(f"✅ Excel файл создан: {filepath}")
+
+    return filepath
 
 
 # ============================================
@@ -2415,9 +2654,98 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
             arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
             response += f"\n💰 Остаток: {balance:.2f} → {prev_balance:.2f} ({change:+.1f}%) {arrow}"
 
-    bot.send_message(
-        chat_id, response, parse_mode="Markdown", reply_markup=get_main_menu()
-    )
+    # Кнопка экспорта в Excel
+    markup = types.InlineKeyboardMarkup()
+    if OPENPYXL_AVAILABLE:
+        btn_export = types.InlineKeyboardButton(
+            "📥 Экспорт в Excel",
+            callback_data=f"export_{report_type}_{start_date.isoformat()}_{end_date.isoformat()}",
+        )
+        markup.add(btn_export)
+    else:
+        btn_export = types.InlineKeyboardButton(
+            "❌ Экспорт недоступен (openpyxl не установлен)",
+            callback_data="export_unavailable",
+        )
+        markup.add(btn_export)
+
+    bot.send_message(chat_id, response, parse_mode="Markdown", reply_markup=markup)
+
+
+# ============================================
+# ========== ОБРАБОТЧИК ЭКСПОРТА ============
+# ============================================
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("export_"))
+def handle_export_callback(call):
+    user_id = call.from_user.id
+    logger.info(f"📊 Запрос экспорта от пользователя {user_id}: {call.data}")
+
+    if call.data == "export_unavailable":
+        bot.answer_callback_query(
+            call.id, "❌ Экспорт в Excel недоступен. Установите openpyxl на сервере."
+        )
+        return
+
+    if not OPENPYXL_AVAILABLE:
+        bot.answer_callback_query(
+            call.id, "❌ Экспорт в Excel недоступен. Установите openpyxl на сервере."
+        )
+        return
+
+    try:
+        # Парсим данные из callback
+        parts = call.data.split("_")
+        if len(parts) < 4:
+            bot.answer_callback_query(call.id, "❌ Ошибка: неверный формат запроса")
+            return
+
+        report_type = parts[1]
+        start_date_str = parts[2]
+        end_date_str = parts[3]
+
+        start_date = datetime.fromisoformat(start_date_str)
+        end_date = datetime.fromisoformat(end_date_str)
+
+        family_id = get_user_family_db(user_id)
+        if not family_id:
+            bot.answer_callback_query(call.id, "❌ Сначала войдите в семью!")
+            return
+
+        # Отправляем уведомление о начале генерации
+        bot.answer_callback_query(
+            call.id, "⏳ Создаю Excel файл... Подождите несколько секунд"
+        )
+
+        # Создаем отчет
+        filepath = create_excel_report(
+            family_id, user_id, start_date, end_date, report_type
+        )
+
+        # Отправляем файл
+        with open(filepath, "rb") as f:
+            bot.send_document(
+                call.message.chat.id,
+                f,
+                caption=f"📊 Отчет за период {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}",
+            )
+
+        # Удаляем временный файл
+        try:
+            os.remove(filepath)
+            logger.info(f"✅ Временный файл удален: {filepath}")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось удалить временный файл: {e}")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при экспорте: {e}", exc_info=True)
+        bot.send_message(
+            call.message.chat.id,
+            f"❌ Произошла ошибка при создании Excel файла: {str(e)}\n\n"
+            "Проверьте, что openpyxl установлен: pip install openpyxl",
+        )
+        bot.answer_callback_query(call.id, "❌ Ошибка при экспорте")
 
 
 # ============================================
@@ -3777,6 +4105,13 @@ if __name__ == "__main__":
     logger.info("🤖 Бот запущен и готов к работе на Bothost!")
     logger.info("💰 Семейный бюджет бот активен")
     logger.info(f"💾 Данные сохраняются в {DB_NAME}")
+
+    if OPENPYXL_AVAILABLE:
+        logger.info("📊 Экспорт в Excel доступен (openpyxl установлен)")
+    else:
+        logger.warning(
+            "⚠️ Экспорт в Excel НЕДОСТУПЕН. Установите openpyxl: pip install openpyxl"
+        )
 
     run_reminder_checker()
 
