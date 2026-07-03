@@ -548,6 +548,39 @@ def get_categories_db(family_id, category_type=None, parent_id=None):
         return [dict(row) for row in cursor.fetchall()]
 
 
+def get_all_categories_with_hierarchy(family_id, category_type):
+    """Возвращает все категории с иерархией для отображения"""
+    result = []
+    parent_categories = get_categories_db(family_id, category_type, parent_id=None)
+
+    for parent in parent_categories:
+        result.append(
+            {
+                "id": parent["id"],
+                "name": parent["name"],
+                "level": 0,
+                "parent_id": None,
+                "is_parent": True,
+            }
+        )
+
+        subcategories = get_categories_db(
+            family_id, category_type, parent_id=parent["id"]
+        )
+        for sub in subcategories:
+            result.append(
+                {
+                    "id": sub["id"],
+                    "name": f"  └─ {sub['name']}",
+                    "level": 1,
+                    "parent_id": parent["id"],
+                    "is_parent": False,
+                }
+            )
+
+    return result
+
+
 def get_category_by_id(category_id):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -586,6 +619,108 @@ def delete_category_db(category_id, family_id):
         )
 
         return has_transactions, has_subcategories
+
+
+def get_all_category_ids_for_limit(family_id, category_id):
+    """Возвращает все ID категорий для расчета лимита"""
+    category_info = get_category_by_id(category_id)
+    if not category_info:
+        return [category_id]
+
+    if category_info["parent_id"] is not None:
+        return [category_id]
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM categories WHERE parent_id = ? AND family_id = ?",
+            (category_id, family_id),
+        )
+        subcategories = [row["id"] for row in cursor.fetchall()]
+
+    return [category_id] + subcategories
+
+
+def check_single_limit(family_id, limit_category_id, limit_amount):
+    """Проверяет один лимит, возвращает строку с предупреждением или None"""
+    now = datetime.now()
+    start_date = datetime(now.year, now.month, 1)
+    if now.month == 12:
+        end_date = datetime(now.year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end_date = datetime(now.year, now.month + 1, 1) - timedelta(days=1)
+
+    month_trans = get_transactions_db(
+        family_id, start_date=start_date, end_date=end_date
+    )
+
+    category_ids = get_all_category_ids_for_limit(family_id, limit_category_id)
+
+    current_expense = sum(
+        t["amount"]
+        for t in month_trans
+        if t["type"] == "Расход" and t["category_id"] in category_ids
+    )
+
+    percentage = (current_expense / limit_amount) * 100 if limit_amount > 0 else 0
+    category_name = get_category_full_name(limit_category_id)
+    category_info = get_category_by_id(limit_category_id)
+
+    is_parent = category_info["parent_id"] is None if category_info else False
+
+    if is_parent:
+        subcats = get_categories_db(family_id, "expense", parent_id=limit_category_id)
+        subcat_names = ", ".join([sub["name"] for sub in subcats]) if subcats else "нет"
+        category_display = f"{category_name} (включает: {subcat_names})"
+    else:
+        category_display = category_name
+
+    if percentage >= 100:
+        return (
+            f"⚠️ **ПРЕВЫШЕНИЕ БЮДЖЕТА!** ⚠️\n"
+            f"📁 Категория: {category_display}\n"
+            f"💰 Лимит: {limit_amount:.2f} руб.\n"
+            f"💸 Потрачено: {current_expense:.2f} руб.\n"
+            f"🔴 Превышение: {current_expense - limit_amount:.2f} руб."
+        )
+    elif percentage >= 80:
+        return (
+            f"⚠️ **ВНИМАНИЕ! Близки к лимиту!**\n"
+            f"📁 Категория: {category_display}\n"
+            f"💰 Лимит: {limit_amount:.2f} руб.\n"
+            f"💸 Потрачено: {current_expense:.2f} руб.\n"
+            f"📊 Остаток: {limit_amount - current_expense:.2f} руб. ({percentage:.1f}% использовано)"
+        )
+
+    return None
+
+
+def check_budget_limits(family_id, category_id):
+    """Проверяет все лимиты для категории, возвращает список предупреждений"""
+    warnings = []
+    limits = get_budget_limits_db(family_id)
+
+    if not limits:
+        return warnings
+
+    if category_id in limits:
+        warning = check_single_limit(
+            family_id, category_id, limits[category_id]["limit"]
+        )
+        if warning:
+            warnings.append(warning)
+
+    category_info = get_category_by_id(category_id)
+    if category_info and category_info["parent_id"] is not None:
+        parent_id = category_info["parent_id"]
+        if parent_id in limits:
+            warning = check_single_limit(
+                family_id, parent_id, limits[parent_id]["limit"]
+            )
+            if warning:
+                warnings.append(warning)
+
+    return warnings
 
 
 def get_main_menu():
@@ -1410,6 +1545,7 @@ def handle_category_selection(message):
         state["selected_category_name"] = category["name"]
         state["subcategories"] = subcategories
         state["action"] = "add_transaction"
+        state["waiting_for"] = "subcategory"
         save_user_state_db(user_id, state)
 
         logger.info(
@@ -1439,8 +1575,8 @@ def handle_category_selection(message):
 
 @bot.message_handler(
     func=lambda message: (
-        message.text
-        and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+        get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+        and get_user_state_db(message.from_user.id).get("waiting_for") == "subcategory"
         and message.text in ["➡️ Без подкатегории", "❌ Отмена"]
     )
 )
@@ -1470,6 +1606,8 @@ def handle_subcategory_special(message):
         state["category_name"] = state["selected_category_name"]
         state["subcategory"] = None
         state["action"] = "add_transaction"
+        if "waiting_for" in state:
+            del state["waiting_for"]
         save_user_state_db(user_id, state)
 
         msg = bot.send_message(
@@ -1483,8 +1621,8 @@ def handle_subcategory_special(message):
 
 @bot.message_handler(
     func=lambda message: (
-        message.text
-        and get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+        get_user_state_db(message.from_user.id).get("action") == "add_transaction"
+        and get_user_state_db(message.from_user.id).get("waiting_for") == "subcategory"
         and message.text not in ["➡️ Без подкатегории", "❌ Отмена"]
     )
 )
@@ -1492,6 +1630,10 @@ def handle_subcategory_selection(message):
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_subcategory = message.text
+
+    if selected_subcategory in ["➡️ Без подкатегории", "❌ Отмена"]:
+        return
+
     logger.info(
         f"🔍 Выбрана подкатегория: '{selected_subcategory}' от пользователя {user_id}"
     )
@@ -1564,6 +1706,8 @@ def handle_subcategory_selection(message):
     state["category_name"] = f"{parent_name} → {selected_sub['name']}"
     state["subcategory"] = selected_sub["name"]
     state["action"] = "add_transaction"
+    if "waiting_for" in state:
+        del state["waiting_for"]
     save_user_state_db(user_id, state)
 
     msg = bot.send_message(
@@ -1632,31 +1776,9 @@ def handle_amount(message):
 
     response = f"✅ Записано!\n• {trans_type_text}: {amount:.2f} руб.\n• Категория: {category_name}"
 
-    if trans_type == "expense":
-        limits = get_budget_limits_db(family_id)
-        if category_id in limits:
-            now = datetime.now()
-            start_date = datetime(now.year, now.month, 1)
-            if now.month == 12:
-                end_date = datetime(now.year + 1, 1, 1) - timedelta(days=1)
-            else:
-                end_date = datetime(now.year, now.month + 1, 1) - timedelta(days=1)
-
-            month_trans = get_transactions_db(
-                family_id, start_date=start_date, end_date=end_date
-            )
-            current_expense = sum(
-                t["amount"]
-                for t in month_trans
-                if t["type"] == "Расход" and t["category_id"] == category_id
-            )
-            limit = limits[category_id]["limit"]
-            percentage = (current_expense / limit) * 100 if limit > 0 else 0
-
-            if percentage >= 100:
-                response += f"\n\n⚠️ **ПРЕВЫШЕНИЕ БЮДЖЕТА!** ⚠️\nЛимит: {limit:.2f} руб.\nПревышение: {current_expense - limit:.2f} руб."
-            elif percentage >= 80:
-                response += f"\n\n⚠️ **ВНИМАНИЕ! Близки к лимиту!**\nЛимит: {limit:.2f} руб.\nОстаток: {limit - current_expense:.2f} руб."
+    warnings = check_budget_limits(family_id, category_id)
+    if warnings:
+        response += "\n\n" + "\n\n".join(warnings)
 
     bot.send_message(
         message.chat.id,
@@ -2211,7 +2333,7 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
 
 
 # ============================================
-# ========== БЮДЖЕТНЫЕ ЛИМИТЫ ============
+# ========== БЮДЖЕТНЫЕ ЛИМИТЫ (ИСПРАВЛЕНО) ============
 # ============================================
 
 
@@ -2246,23 +2368,31 @@ def set_limit_category(message):
     if not family_id:
         return
 
-    categories = get_categories_db(family_id, "expense")
-    if not categories:
+    all_categories = get_all_categories_with_hierarchy(family_id, "expense")
+
+    if not all_categories:
         bot.send_message(
             message.chat.id,
-            "Нет категорий для установки лимита. Сначала создайте категорию.",
+            "Нет категорий для установки лимита. Сначала создайте категорию расходов.",
             reply_markup=get_main_menu(),
         )
         return
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    for cat in categories:
+    for cat in all_categories:
         markup.add(types.KeyboardButton(cat["name"]))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
-    save_user_state_db(user_id, {"action": "set_limit", "categories": categories})
+    save_user_state_db(
+        user_id, {"action": "set_limit", "all_categories": all_categories}
+    )
+
     bot.send_message(
-        message.chat.id, "Выберите категорию для установки лимита:", reply_markup=markup
+        message.chat.id,
+        "Выберите категорию для установки лимита:\n\n"
+        "📁 - родительская категория (включает все подкатегории)\n"
+        "  └─ - подкатегория (только для неё)",
+        reply_markup=markup,
     )
 
 
@@ -2281,23 +2411,22 @@ def set_limit_amount(message):
         f"📌 Выбрана категория для лимита: {selected_category} от пользователя {user_id}"
     )
 
-    categories = state.get("categories", [])
+    all_categories = state.get("all_categories", [])
     category = None
-    for c in categories:
-        if c["name"] == selected_category:
-            category = c
+
+    # Ищем категорию по имени (учитывая отступы)
+    for cat in all_categories:
+        if cat["name"] == selected_category:
+            category = cat
             break
 
+    # Если не нашли, пробуем без учета отступов
     if not category:
-        clean_sel = "".join(
-            ch for ch in selected_category if ch.isalnum() or ch.isspace()
-        ).strip()
-        for c in categories:
-            clean_cat = "".join(
-                ch for ch in c["name"] if ch.isalnum() or ch.isspace()
-            ).strip()
+        clean_sel = selected_category.replace("  └─ ", "").strip()
+        for cat in all_categories:
+            clean_cat = cat["name"].replace("  └─ ", "").strip()
             if clean_cat == clean_sel:
-                category = c
+                category = cat
                 break
 
     if not category:
@@ -2310,12 +2439,15 @@ def set_limit_amount(message):
         return
 
     state["category_id"] = category["id"]
-    state["category_name"] = category["name"]
+    state["category_name"] = category["name"].replace("  └─ ", "").strip()
+    state["is_parent"] = category.get("is_parent", False)
     save_user_state_db(user_id, state)
 
+    category_type = "родительскую" if state["is_parent"] else "подкатегорию"
     msg = bot.send_message(
         message.chat.id,
-        f"Введите лимит для категории *{category['name']}* (в рублях):\nНапример: 15000",
+        f"Введите лимит для {category_type} категории *{state['category_name']}* (в рублях):\n"
+        f"Например: 15000",
         parse_mode="Markdown",
         reply_markup=types.ReplyKeyboardRemove(),
     )
@@ -2345,14 +2477,25 @@ def save_limit_amount(message):
     family_id = get_user_family_db(user_id)
     category_id = state["category_id"]
     category_name = state["category_name"]
+    is_parent = state.get("is_parent", False)
 
     set_budget_limit_db(family_id, category_id, limit)
     load_data_to_memory()
     delete_user_state_db(user_id)
 
+    category_type = "родительскую" if is_parent else "подкатегорию"
+    if is_parent:
+        subcats = get_categories_db(family_id, "expense", parent_id=category_id)
+        subcat_names = ", ".join([sub["name"] for sub in subcats]) if subcats else "нет"
+        extra_info = f"\n📁 Включает подкатегории: {subcat_names}"
+    else:
+        extra_info = ""
+
     bot.send_message(
         message.chat.id,
-        f"✅ **Лимит установлен!**\n\n📌 Категория: {category_name}\n💰 Лимит: {limit:.2f} руб.",
+        f"✅ **Лимит установлен!**\n\n"
+        f"📌 Категория: {category_name} ({category_type})\n"
+        f"💰 Лимит: {limit:.2f} руб.{extra_info}",
         parse_mode="Markdown",
         reply_markup=get_main_menu(),
     )
@@ -2394,37 +2537,57 @@ def view_limits(message):
         return
 
     response = "📊 **Бюджетные лимиты:**\n\n"
+    now = datetime.now()
+    start_date = datetime(now.year, now.month, 1)
+    if now.month == 12:
+        end_date = datetime(now.year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end_date = datetime(now.year, now.month + 1, 1) - timedelta(days=1)
+
+    month_trans = get_transactions_db(
+        family_id, start_date=start_date, end_date=end_date
+    )
+
     for category_id, data in limits.items():
         category_name = data["name"]
         limit = data["limit"]
-        now = datetime.now()
-        start_date = datetime(now.year, now.month, 1)
-        if now.month == 12:
-            end_date = datetime(now.year + 1, 1, 1) - timedelta(days=1)
-        else:
-            end_date = datetime(now.year, now.month + 1, 1) - timedelta(days=1)
 
-        month_trans = get_transactions_db(
-            family_id, start_date=start_date, end_date=end_date
-        )
+        category_ids = get_all_category_ids_for_limit(family_id, category_id)
         current_expense = sum(
             t["amount"]
             for t in month_trans
-            if t["type"] == "Расход" and t["category_id"] == category_id
+            if t["type"] == "Расход" and t["category_id"] in category_ids
         )
         percentage = (current_expense / limit) * 100 if limit > 0 else 0
 
-        if percentage >= 100:
-            status = "🔴 **ПРЕВЫШЕН**"
-        elif percentage >= 80:
-            status = "🟡 **ПРЕДУПРЕЖДЕНИЕ**"
-        else:
-            status = "🟢 Норма"
+        category_info = get_category_by_id(category_id)
+        is_parent = category_info["parent_id"] is None if category_info else True
 
-        response += f"• *{category_name}*\n"
-        response += f"  Лимит: {limit:.2f} руб.\n"
-        response += f"  Потрачено: {current_expense:.2f} руб. ({percentage:.1f}%)\n"
-        response += f"  Статус: {status}\n\n"
+        if is_parent:
+            subcats = get_categories_db(family_id, "expense", parent_id=category_id)
+            subcat_names = (
+                ", ".join([sub["name"] for sub in subcats]) if subcats else "нет"
+            )
+            response += f"📁 *{category_name}* (включает: {subcat_names})\n"
+        else:
+            parent = (
+                get_category_by_id(category_info["parent_id"])
+                if category_info
+                else None
+            )
+            parent_name = parent["name"] if parent else ""
+            response += f"📄 *{category_name}* (подкатегория «{parent_name}»)\n"
+
+        response += f"  💰 Лимит: {limit:.2f} руб.\n"
+        response += f"  💸 Потрачено: {current_expense:.2f} руб. ({percentage:.1f}%)\n"
+
+        if percentage >= 100:
+            response += "  🔴 **ПРЕВЫШЕН**\n"
+        elif percentage >= 80:
+            response += "  🟡 **ПРЕДУПРЕЖДЕНИЕ**\n"
+        else:
+            response += "  🟢 Норма\n"
+        response += "\n"
 
     bot.send_message(
         message.chat.id, response, parse_mode="Markdown", reply_markup=get_limits_menu()
@@ -2451,7 +2614,13 @@ def delete_limit_category(message):
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     for category_id, data in limits.items():
-        markup.add(types.KeyboardButton(data["name"]))
+        category_info = get_category_by_id(category_id)
+        is_parent = category_info["parent_id"] is None if category_info else True
+        if is_parent:
+            label = f"📁 {data['name']}"
+        else:
+            label = f"📄 {data['name']}"
+        markup.add(types.KeyboardButton(label))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
     save_user_state_db(user_id, {"action": "delete_limit", "limits": limits})
@@ -2469,7 +2638,9 @@ def delete_limit_category(message):
 )
 def confirm_delete_limit(message):
     user_id = message.from_user.id
-    category_name = message.text
+    selected_label = message.text
+    # Убираем эмодзи из названия
+    category_name = selected_label.replace("📁 ", "").replace("📄 ", "").strip()
     logger.info(
         f"🗑 Подтверждение удаления лимита: {category_name} от пользователя {user_id}"
     )
