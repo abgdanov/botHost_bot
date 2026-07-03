@@ -820,6 +820,223 @@ def get_cancel_confirmation_menu():
 
 
 # ============================================
+# ========== НОВЫЕ КОМАНДЫ ============
+# ============================================
+
+
+@bot.message_handler(commands=["help"])
+def help_command(message):
+    user_id = message.from_user.id
+    logger.info(f"🆘 Команда /help от пользователя {user_id}")
+
+    family_id = get_user_family_db(user_id)
+
+    if family_id:
+        text = (
+            "👋 **Справка по боту**\n\n"
+            "📌 **Команды:**\n"
+            "/start - показать приветственное сообщение\n"
+            "/help - показать эту справку\n"
+            "/restart - сбросить состояние бота (без выхода из семьи)\n"
+            "/leave - выйти из семьи\n\n"
+            "📌 **Основные возможности:**\n"
+            "• 📉 Добавить Расход - записать трату\n"
+            "• 📈 Добавить Доход - записать доход\n"
+            "• 📊 Отчеты - подробная статистика за период\n"
+            "• 📊 История и Баланс - текущий баланс и последние операции\n"
+            "• 💰 Бюджетные лимиты - установка лимитов по категориям\n"
+            "• ⏰ Напоминания о платежах - регулярные напоминания\n"
+            "• 🏷️ Категории - управление категориями\n"
+            "• ↩️ Отменить операцию - отмена последней операции\n\n"
+            "📊 **Экспорт в Excel** доступен в отчетах."
+        )
+        bot.send_message(
+            message.chat.id,
+            text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu(),
+        )
+    else:
+        text = (
+            "👋 **Справка по боту**\n\n"
+            "📌 **Команды:**\n"
+            "/start - показать приветственное сообщение\n"
+            "/help - показать эту справку\n"
+            "/restart - сбросить состояние бота\n\n"
+            "📌 **Для начала работы:**\n"
+            "Создайте новую семью или войдите в существующую.\n\n"
+            "📌 **Основные возможности:**\n"
+            "• Запись доходов и расходов\n"
+            "• Отчёты за любой период\n"
+            "• Бюджетные лимиты\n"
+            "• Напоминания о платежах\n"
+            "• Свои категории\n"
+            "• Экспорт в Excel"
+        )
+        bot.send_message(
+            message.chat.id,
+            text,
+            parse_mode="Markdown",
+            reply_markup=get_auth_menu(),
+        )
+
+
+@bot.message_handler(commands=["restart"])
+def restart_command(message):
+    user_id = message.from_user.id
+    logger.info(f"🔄 Команда /restart от пользователя {user_id}")
+
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+    if family_id:
+        bot.send_message(
+            message.chat.id,
+            f"🔄 Бот перезапущен. Вы в семье №`{family_id}`.\n\n"
+            f"Используйте кнопки меню для управления бюджетом.",
+            parse_mode="Markdown",
+            reply_markup=get_main_menu(),
+        )
+    else:
+        bot.send_message(
+            message.chat.id,
+            "🔄 Бот перезапущен. Вы не состоите в семье.\n\n"
+            "Создайте новую семью или войдите в существующую.",
+            reply_markup=get_auth_menu(),
+        )
+
+
+@bot.message_handler(commands=["leave"])
+def leave_command(message):
+    user_id = message.from_user.id
+    logger.info(f"🚪 Команда /leave от пользователя {user_id}")
+
+    family_id = get_user_family_db(user_id)
+    if not family_id:
+        bot.send_message(
+            message.chat.id,
+            "❌ Вы не состоите в семье. Создайте новую семью или войдите в существующую.",
+            reply_markup=get_auth_menu(),
+        )
+        return
+
+    save_user_state_db(user_id, {"action": "leave_family"})
+
+    msg = bot.send_message(
+        message.chat.id,
+        f"⚠️ **Вы уверены, что хотите выйти из семьи №{family_id}?**\n\n"
+        f"После выхода:\n"
+        f"• Вы потеряете доступ к общим данным семьи\n"
+        f"• Ваши транзакции останутся в истории семьи\n"
+        f"• Ваши напоминания перестанут работать до повторного входа\n"
+        f"• Вы сможете вернуться в эту семью по ID\n\n"
+        f"Напишите **«да»** для подтверждения или **«нет»** для отмены.",
+        parse_mode="Markdown",
+    )
+    bot.register_next_step_handler(msg, process_leave_confirmation)
+
+
+def process_leave_confirmation(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+
+    if state.get("action") != "leave_family":
+        bot.send_message(
+            message.chat.id,
+            "❌ Нет активной операции выхода из семьи.",
+            reply_markup=get_main_menu(),
+        )
+        return
+
+    if message.text.lower() == "да":
+        family_id = get_user_family_db(user_id)
+        if family_id:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+
+            delete_user_state_db(user_id)
+            load_data_to_memory()
+
+            bot.send_message(
+                message.chat.id,
+                f"✅ Вы вышли из семьи №{family_id}.\n\n"
+                f"Теперь вы можете создать новую семью или войти в существующую.",
+                reply_markup=get_auth_menu(),
+            )
+        else:
+            bot.send_message(
+                message.chat.id,
+                "❌ Произошла ошибка. Попробуйте еще раз.",
+                reply_markup=get_main_menu(),
+            )
+    else:
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id,
+            "❌ Выход из семьи отменен.",
+            reply_markup=get_main_menu(),
+        )
+
+
+# ============================================
+# ========== ОБНОВЛЁННЫЙ /start ============
+# ============================================
+
+
+@bot.message_handler(commands=["start"])
+def start_message(message):
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name
+    logger.info(f"🔄 Команда /start от пользователя {user_id} ({first_name})")
+
+    delete_user_state_db(user_id)
+
+    family_id = get_user_family_db(user_id)
+
+    if family_id:
+        text = (
+            f"👋 Привет, {first_name}!\n\n"
+            f"Вы в семейной группе №`{family_id}`.\n\n"
+            f"📌 **Команды:**\n"
+            f"/start - показать это сообщение\n"
+            f"/help - справка по боту\n"
+            f"/restart - сбросить состояние бота\n"
+            f"/leave - выйти из семьи\n\n"
+            f"Используйте кнопки меню для управления бюджетом."
+        )
+        bot.send_message(
+            message.chat.id,
+            text,
+            parse_mode="Markdown",
+            reply_markup=get_main_menu(),
+        )
+    else:
+        text = (
+            f"👋 Привет, {first_name}!\n\n"
+            f"Это бот **Семейный бюджет** для учёта доходов и расходов всей семьи.\n\n"
+            f"📌 **Основные возможности:**\n"
+            f"• Запись доходов и расходов\n"
+            f"• Отчёты за любой период\n"
+            f"• Бюджетные лимиты с предупреждениями\n"
+            f"• Напоминания о регулярных платежах\n"
+            f"• Свои категории и подкатегории\n"
+            f"• Экспорт в Excel\n\n"
+            f"📌 **Команды:**\n"
+            f"/start - показать это сообщение\n"
+            f"/help - справка по боту\n"
+            f"/restart - сбросить состояние бота\n\n"
+            f"Чтобы начать, создайте новую семью или войдите в существующую:"
+        )
+        bot.send_message(
+            message.chat.id,
+            text,
+            parse_mode="Markdown",
+            reply_markup=get_auth_menu(),
+        )
+
+
+# ============================================
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
 # ============================================
 
@@ -1092,30 +1309,6 @@ def create_excel_report(family_id, user_id, start_date, end_date, report_type):
 # ============================================
 # ========== ХЕНДЛЕРЫ КОМАНД ============
 # ============================================
-
-
-@bot.message_handler(commands=["start"])
-def start_message(message):
-    user_id = message.from_user.id
-    first_name = message.from_user.first_name
-    logger.info(f"🔄 Команда /start от пользователя {user_id} ({first_name})")
-
-    delete_user_state_db(user_id)
-
-    family_id = get_user_family_db(user_id)
-    if family_id:
-        bot.send_message(
-            message.chat.id,
-            f"Привет, {first_name}! 👋\nВы в семейной группе №`{family_id}`.",
-            parse_mode="Markdown",
-            reply_markup=get_main_menu(),
-        )
-    else:
-        bot.send_message(
-            message.chat.id,
-            f"Привет, {first_name}! 👋\nДля ведения совместного бюджета нужно создать семейную группу или подключиться к существующей:",
-            reply_markup=get_auth_menu(),
-        )
 
 
 # ============================================
