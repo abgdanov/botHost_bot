@@ -292,6 +292,70 @@ def add_emoji_to_category_name(name):
     return name
 
 
+def extract_emoji_from_name(name):
+    """Извлекает эмодзи из начала названия"""
+    if not name:
+        return None, name
+
+    first_char = name[0]
+    emoji_ranges = [
+        (0x1F600, 0x1F64F),
+        (0x1F300, 0x1F5FF),
+        (0x1F680, 0x1F6FF),
+        (0x2600, 0x26FF),
+        (0x2700, 0x27BF),
+    ]
+    code = ord(first_char)
+    for start, end in emoji_ranges:
+        if start <= code <= end:
+            return first_char, name[1:].strip()
+
+    return None, name
+
+
+def get_category_display_clean(category_id):
+    """Возвращает название категории с одним эмодзи (без дублирования)"""
+    full_name = get_category_full_name(category_id)
+    if not full_name:
+        return "❓ Без категории"
+
+    parts = full_name.split(" → ")
+    result_parts = []
+
+    for part in parts:
+        emoji, clean_name = extract_emoji_from_name(part)
+        if emoji:
+            # Уже есть эмодзи - оставляем как есть
+            result_parts.append(part)
+        else:
+            # Нет эмодзи - добавляем
+            new_emoji = get_category_emoji(part)
+            if new_emoji and new_emoji != "📌":
+                result_parts.append(f"{new_emoji} {clean_name}")
+            else:
+                result_parts.append(part)
+
+    return " → ".join(result_parts)
+
+
+def get_category_display_name(category_name):
+    """Возвращает имя категории с эмодзи для отображения"""
+    emoji, clean_name = extract_emoji_from_name(category_name)
+    if emoji:
+        return f"{emoji} {clean_name}"
+    else:
+        return f"📁 {category_name}"
+
+
+def get_parent_display_name(category_name):
+    """Возвращает имя для кнопки 'На всю категорию'"""
+    emoji, clean_name = extract_emoji_from_name(category_name)
+    if emoji:
+        return f"➡️ На всю категорию {emoji} {clean_name}"
+    else:
+        return f"➡️ На всю категорию 📁 {category_name}"
+
+
 def get_budget_limits_db(family_id):
     with get_db() as conn:
         cursor = conn.cursor()
@@ -590,7 +654,6 @@ def delete_category_db(category_id, family_id):
 
 
 def get_all_category_ids_for_limit(family_id, category_id):
-    """Возвращает все ID категорий для расчета лимита"""
     category_info = get_category_by_id(category_id)
     if not category_info:
         return [category_id]
@@ -610,7 +673,6 @@ def get_all_category_ids_for_limit(family_id, category_id):
 
 
 def check_single_limit(family_id, limit_category_id, limit_amount):
-    """Проверяет один лимит, возвращает строку с предупреждением или None"""
     now = datetime.now()
     start_date = datetime(now.year, now.month, 1)
     if now.month == 12:
@@ -631,103 +693,38 @@ def check_single_limit(family_id, limit_category_id, limit_amount):
     )
 
     percentage = (current_expense / limit_amount) * 100 if limit_amount > 0 else 0
-    category_name = get_category_full_name(limit_category_id)
-    category_info = get_category_by_id(limit_category_id)
-
-    is_parent = category_info["parent_id"] is None if category_info else False
-
-    if is_parent:
-        subcats = get_categories_db(family_id, "expense", parent_id=limit_category_id)
-        subcat_names = ", ".join([sub["name"] for sub in subcats]) if subcats else "нет"
-        category_display = f"{category_name} (включает: {subcat_names})"
-    else:
-        category_display = category_name
+    category_name = get_category_display_clean(limit_category_id)
 
     if percentage >= 100:
-        return (
-            f"⚠️ **ПРЕВЫШЕНИЕ БЮДЖЕТА!** ⚠️\n"
-            f"📁 Категория: {category_display}\n"
-            f"💰 Лимит: {limit_amount:.2f} руб.\n"
-            f"💸 Потрачено: {current_expense:.2f} руб.\n"
-            f"🔴 Превышение: {current_expense - limit_amount:.2f} руб."
-        )
-    elif percentage >= 80:
-        return (
-            f"⚠️ **ВНИМАНИЕ! Близки к лимиту!**\n"
-            f"📁 Категория: {category_display}\n"
-            f"💰 Лимит: {limit_amount:.2f} руб.\n"
-            f"💸 Потрачено: {current_expense:.2f} руб.\n"
-            f"📊 Остаток: {limit_amount - current_expense:.2f} руб. ({percentage:.1f}% использовано)"
-        )
+        return f"🔴 {category_name}: {percentage:.0f}% ({current_expense:.0f}/{limit_amount:.0f} руб.) ⚠️ ПРЕВЫШЕНИЕ!"
 
     return None
 
 
-def check_budget_limits(family_id, category_id):
-    """Проверяет все лимиты для категории, возвращает список предупреждений"""
-    warnings = []
+def check_budget_limits_for_report(family_id):
     limits = get_budget_limits_db(family_id)
-
     if not limits:
-        return warnings
+        return []
 
-    if category_id in limits:
-        warning = check_single_limit(
-            family_id, category_id, limits[category_id]["limit"]
-        )
+    warnings = []
+    for category_id, data in limits.items():
+        warning = check_single_limit(family_id, category_id, data["limit"])
         if warning:
             warnings.append(warning)
-
-    category_info = get_category_by_id(category_id)
-    if category_info and category_info["parent_id"] is not None:
-        parent_id = category_info["parent_id"]
-        if parent_id in limits:
-            warning = check_single_limit(
-                family_id, parent_id, limits[parent_id]["limit"]
-            )
-            if warning:
-                warnings.append(warning)
 
     return warnings
 
 
-def extract_emoji_from_name(name):
-    """Извлекает эмодзи из начала названия категории"""
-    if not name:
-        return None, name
-
-    first_char = name[0]
-    emoji_ranges = [
-        (0x1F600, 0x1F64F),
-        (0x1F300, 0x1F5FF),
-        (0x1F680, 0x1F6FF),
-        (0x2600, 0x26FF),
-        (0x2700, 0x27BF),
-    ]
-    code = ord(first_char)
-    for start, end in emoji_ranges:
-        if start <= code <= end:
-            return first_char, name[1:].strip()
-
-    return None, name
+def format_amount(amount):
+    if amount == int(amount):
+        return f"{amount:.1f}"
+    return f"{amount:.2f}"
 
 
-def get_category_display_name(category_name, default_emoji="📁"):
-    """Возвращает имя категории с эмодзи для отображения"""
-    emoji, clean_name = extract_emoji_from_name(category_name)
-    if emoji:
-        return f"{emoji} {clean_name}"
-    else:
-        return f"{default_emoji} {category_name}"
-
-
-def get_parent_display_name(category_name):
-    """Возвращает имя для кнопки 'На всю категорию'"""
-    emoji, clean_name = extract_emoji_from_name(category_name)
-    if emoji:
-        return f"➡️ На всю категорию {emoji} {clean_name}"
-    else:
-        return f"➡️ На всю категорию 📁 {category_name}"
+def create_percentage_bar(percent, length=10):
+    filled = int(percent / 100 * length)
+    empty = length - filled
+    return "█" * filled + "░" * empty
 
 
 def get_main_menu():
@@ -1418,7 +1415,7 @@ def list_categories(message):
 
 
 # ============================================
-# ========== УЧЕТ РАСХОДОВ И ДОХОДОВ (ЕДИНЫЙ ХЕНДЛЕР) ============
+# ========== УЧЕТ РАСХОДОВ И ДОХОДОВ ============
 # ============================================
 
 
@@ -1481,7 +1478,6 @@ def handle_menu(message):
     )
 )
 def handle_transaction_messages(message):
-    """Единый хендлер для всех сообщений при добавлении транзакции"""
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     text = message.text
@@ -1490,9 +1486,7 @@ def handle_transaction_messages(message):
         f"🔍 Обработка сообщения: '{text}' от пользователя {user_id}, waiting_for={state.get('waiting_for')}"
     )
 
-    # ====== ЭТАП 1: Если мы в процессе выбора подкатегории ======
     if state.get("waiting_for") == "subcategory":
-        # Специальные кнопки
         if text == "❌ Отмена":
             logger.info(f"❌ Отмена выбора подкатегории от пользователя {user_id}")
             delete_user_state_db(user_id)
@@ -1532,13 +1526,9 @@ def handle_transaction_messages(message):
             bot.register_next_step_handler(msg, handle_amount)
             return
 
-        # Обычный выбор подкатегории
-        logger.info(f"📌 Обработка выбора подкатегории: '{text}'")
         handle_subcategory_selection(message)
         return
 
-    # ====== ЭТАП 2: Выбор родительской категории ======
-    # Проверяем, не является ли текст специальной кнопкой
     if text == "❌ Отмена":
         logger.info(f"❌ Отмена выбора категории от пользователя {user_id}")
         delete_user_state_db(user_id)
@@ -1551,7 +1541,6 @@ def handle_transaction_messages(message):
 
 
 def handle_category_selection(message):
-    """Обработка выбора родительской категории"""
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_label = message.text.strip()
@@ -1603,8 +1592,6 @@ def handle_category_selection(message):
         subcategories = [dict(row) for row in cursor.fetchall()]
 
     logger.info(f"📂 Найдено подкатегорий: {len(subcategories)}")
-    for sub in subcategories:
-        logger.info(f"  - {sub['name']} (id={sub['id']}, parent_id={sub['parent_id']})")
 
     if subcategories:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
@@ -1619,10 +1606,6 @@ def handle_category_selection(message):
         state["action"] = "add_transaction"
         state["waiting_for"] = "subcategory"
         save_user_state_db(user_id, state)
-
-        logger.info(
-            f"💾 Сохранено состояние: parent_id={category['id']}, подкатегорий={len(subcategories)}"
-        )
 
         bot.send_message(
             message.chat.id,
@@ -1646,7 +1629,6 @@ def handle_category_selection(message):
 
 
 def handle_subcategory_selection(message):
-    """Обработка выбора подкатегории"""
     user_id = message.from_user.id
     state = get_user_state_db(user_id)
     selected_subcategory = message.text
@@ -1666,9 +1648,6 @@ def handle_subcategory_selection(message):
         return
 
     subcategories = state.get("subcategories", [])
-    logger.info(f"📂 Доступно подкатегорий: {len(subcategories)}")
-    for sub in subcategories:
-        logger.info(f"  - '{sub['name']}' (id={sub.get('id')})")
 
     if not subcategories:
         logger.error("❌ СПИСОК ПОДКАТЕГОРИЙ ПУСТ!")
@@ -1793,9 +1772,9 @@ def handle_amount(message):
 
     response = f"✅ Записано!\n• {trans_type_text}: {amount:.2f} руб.\n• Категория: {category_name}"
 
-    warnings = check_budget_limits(family_id, category_id)
+    warnings = check_budget_limits_for_report(family_id)
     if warnings:
-        response += "\n\n" + "\n\n".join(warnings)
+        response += "\n\n⚠️ **ПРЕВЫШЕНИЯ ЛИМИТОВ:**\n" + "\n".join(warnings)
 
     bot.send_message(
         message.chat.id,
@@ -1834,7 +1813,7 @@ def cancel_last_transaction(message):
         return
 
     date_formatted = format_transaction_date(last_trans["date"])
-    category_emoji = get_category_emoji(last_trans["category_name"])
+    category_display = get_category_display_clean(last_trans["category_id"])
 
     message_text = (
         f"⚠️ **Вы уверены, что хотите удалить последнюю операцию?**\n\n"
@@ -1842,7 +1821,7 @@ def cancel_last_transaction(message):
         f"📌 **Тип:** {last_trans['type']}\n"
         f"💰 **Сумма:** `{last_trans['amount']:.2f} руб.`\n"
         f"📅 **Дата:** {date_formatted}\n"
-        f"🏷️ **Категория:** {category_emoji} {last_trans['category_name']}\n"
+        f"🏷️ **Категория:** {category_display}\n"
         f"👤 **Кто:** {last_trans['user_name']}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"Выберите действие:"
@@ -1857,7 +1836,7 @@ def cancel_last_transaction(message):
                 "type": last_trans["type"],
                 "amount": last_trans["amount"],
                 "date": date_formatted,
-                "category": last_trans["category_name"],
+                "category": category_display,
                 "user": last_trans["user_name"],
             },
         },
@@ -2006,10 +1985,6 @@ def show_balance_and_history(message):
     start_of_month = datetime(now.year, now.month, 1)
     seven_days_ago = now - timedelta(days=7)
 
-    transactions = get_transactions_db(
-        family_id, start_date=seven_days_ago, end_date=now
-    )
-
     month_transactions = get_transactions_db(
         family_id, start_date=start_of_month, end_date=now
     )
@@ -2022,51 +1997,78 @@ def show_balance_and_history(message):
 
     days_in_month = (now - start_of_month).days + 1
     avg_spent_per_day = total_expense / days_in_month if days_in_month > 0 else 0
+    avg_income_per_day = total_income / days_in_month if days_in_month > 0 else 0
 
-    response = f"💰 **БАЛАНС СЕМЬИ:** {balance:+.2f} руб.\n"
-    response += f"   📥 Доходы: {total_income:.2f} руб.\n"
-    response += f"   📤 Расходы: {total_expense:.2f} руб.\n\n"
+    response = "💰 **БАЛАНС СЕМЬИ**\n"
+    response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    response += f"📥 Доходы (месяц):   {total_income:>10.2f} руб.\n"
+    response += f"📤 Расходы (месяц):  {total_expense:>10.2f} руб.\n"
+    response += f"💰 Остаток:          {balance:>+10.2f} руб.\n"
+    response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-    response += f"📊 **СТАТИСТИКА С НАЧАЛА МЕСЯЦА:**\n"
-    response += f"   📥 Доходы: {total_income:.2f} руб.\n"
-    response += f"   📤 Расходы: {total_expense:.2f} руб.\n"
-    response += f"   💰 Остаток: {balance:+.2f} руб.\n"
-    response += f"   📅 Дней: {days_in_month}\n"
-    response += f"   📈 Средние траты в день: {avg_spent_per_day:.2f} руб.\n\n"
+    response += "📊 **СТАТИСТИКА ЗА МЕСЯЦ:**\n"
+    response += f"├─ 📅 Дней: {days_in_month}\n"
+    response += f"├─ 📊 Средние траты: {avg_spent_per_day:.2f} руб./день\n"
+    response += f"└─ 📈 Средние доходы: {avg_income_per_day:.2f} руб./день\n\n"
+
+    warnings = check_budget_limits_for_report(family_id)
+    if warnings:
+        response += "⚠️ **ПРЕВЫШЕНИЯ ЛИМИТОВ:**\n"
+        response += "\n".join(warnings)
+        response += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    else:
+        limits = get_budget_limits_db(family_id)
+        if limits:
+            response += "✅ **Превышений лимитов нет** (все в норме)\n"
+            response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+    response += "📋 **ПОСЛЕДНИЕ ОПЕРАЦИИ (7 дней):**\n\n"
+
+    transactions = get_transactions_db(
+        family_id, start_date=seven_days_ago, end_date=now
+    )
 
     if not transactions:
-        response += "📋 **За последние 7 дней операций не было.**"
+        response += "❌ За последние 7 дней операций не было."
     else:
-        response += "📋 **ПОСЛЕДНИЕ 7 ДНЕЙ:**\n\n"
-
-        current_date = None
+        grouped = {}
         for t in transactions:
             t_date = (
                 t["date"].date()
                 if isinstance(t["date"], datetime)
                 else datetime.strptime(t["date"], "%Y-%m-%d %H:%M:%S.%f").date()
             )
-            if current_date != t_date:
-                current_date = t_date
-                if current_date == now.date():
-                    day_label = "Сегодня"
-                elif current_date == (now - timedelta(days=1)).date():
-                    day_label = "Вчера"
-                else:
-                    day_label = current_date.strftime("%d.%m")
-                response += f"**{day_label} ({current_date.strftime('%d.%m')}):**\n"
+            if t_date not in grouped:
+                grouped[t_date] = []
+            grouped[t_date].append(t)
 
-            sign = "-" if t["type"] == "Расход" else "+"
-            time_str = (
-                t["date"].strftime("%H:%M")
-                if isinstance(t["date"], datetime)
-                else datetime.strptime(t["date"], "%Y-%m-%d %H:%M:%S.%f").strftime(
-                    "%H:%M"
-                )
+        sorted_dates = sorted(grouped.keys(), reverse=True)
+
+        for date_key in sorted_dates[:7]:
+            day_trans = grouped[date_key]
+            day_total = sum(
+                t["amount"] if t["type"] == "Доход" else -t["amount"] for t in day_trans
             )
-            category_display = get_category_full_name(t["category_id"])
-            emoji = get_category_emoji(category_display)
-            response += f"   {emoji} {category_display:<20} {sign}{t['amount']:.2f} р.  ({t['user_name']}, {time_str})\n"
+
+            response += f"📅 **{date_key.strftime('%d.%m')}**      Итого: {day_total:+.2f} руб.\n"
+
+            for i, t in enumerate(day_trans):
+                is_last = i == len(day_trans) - 1
+                prefix = "└─ " if is_last else "├─ "
+
+                category_display = get_category_display_clean(t["category_id"])
+                sign = "+" if t["type"] == "Доход" else "-"
+                time_str = (
+                    t["date"].strftime("%H:%M")
+                    if isinstance(t["date"], datetime)
+                    else datetime.strptime(t["date"], "%Y-%m-%d %H:%M:%S.%f").strftime(
+                        "%H:%M"
+                    )
+                )
+
+                response += f"{prefix} {category_display:<20} {sign}{t['amount']:>8.2f}    {t['user_name']:<8} {time_str}\n"
+
+            response += "\n"
 
     bot.send_message(message.chat.id, response, parse_mode="Markdown")
 
@@ -2249,41 +2251,131 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
     balance = total_income - total_expense
 
     response = f"**{title}**\n"
-    response += f"📅 {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')} ({days_in_period} дн.)\n\n"
+    response += f"📅 {start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')} ({days_in_period} дн.)\n"
+    response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-    response += f"💰 **БАЛАНС:** {balance:+.2f} руб.\n"
-    response += f"   📥 Доходы: {total_income:.2f} руб.\n"
-    response += f"   📤 Расходы: {total_expense:.2f} руб.\n\n"
+    response += f"💰 **БАЛАНС:** `{balance:+.2f} руб.`\n"
+    response += f"├─ 📥 Доходы:    {total_income:>10.2f} руб.\n"
+    response += f"└─ 📤 Расходы:   {total_expense:>10.2f} руб.\n\n"
 
     avg_spent = total_expense / days_in_period if days_in_period > 0 else 0
     avg_income = total_income / days_in_period if days_in_period > 0 else 0
-    response += f"📊 Средние траты в день: {avg_spent:.2f} руб.\n"
-    response += f"📈 Средние доходы в день: {avg_income:.2f} руб.\n\n"
 
-    if total_expense > 0:
-        response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        response += "📊 **РАСХОДЫ ПО КАТЕГОРИЯМ:**\n\n"
+    response += "📈 **СТАТИСТИКА:**\n"
+    response += f"├─ 📅 Дней в периоде: {days_in_period}\n"
+    response += f"├─ 📊 Средние траты: {avg_spent:.2f} руб./день\n"
+    response += f"└─ 📈 Средние доходы: {avg_income:.2f} руб./день\n\n"
 
-        expense_by_category = {}
-        for t in transactions:
-            if t["type"] == "Расход":
-                cat_name = get_category_full_name(t["category_id"])
-                if cat_name not in expense_by_category:
-                    expense_by_category[cat_name] = 0
-                expense_by_category[cat_name] += t["amount"]
+    warnings = check_budget_limits_for_report(family_id)
+    if warnings:
+        response += "⚠️ **ПРЕВЫШЕНИЯ ЛИМИТОВ:**\n"
+        response += "\n".join(warnings)
+        response += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    else:
+        limits = get_budget_limits_db(family_id)
+        if limits:
+            response += "✅ **Превышений лимитов нет** (все в норме)\n"
+            response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        sorted_cats = sorted(
-            expense_by_category.items(), key=lambda x: x[1], reverse=True
+    response += "📊 **РАСХОДЫ ПО КАТЕГОРИЯМ:**\n"
+    response += "┌────────────────────────────────┬──────────┬──────────┐\n"
+    response += "│ Категория                      │ Сумма    │ %        │\n"
+    response += "├────────────────────────────────┼──────────┼──────────┤\n"
+
+    expense_trans = [t for t in transactions if t["type"] == "Расход"]
+
+    if expense_trans:
+        category_tree = {}
+        for t in expense_trans:
+            cat_id = t["category_id"]
+            cat_info = get_category_by_id(cat_id)
+            if not cat_info:
+                continue
+
+            parent_id = (
+                cat_info["parent_id"] if cat_info["parent_id"] is not None else cat_id
+            )
+
+            if parent_id not in category_tree:
+                category_tree[parent_id] = {
+                    "id": parent_id,
+                    "name": get_category_full_name(parent_id),
+                    "total": 0,
+                    "subcategories": {},
+                }
+
+            if cat_info["parent_id"] is not None:
+                sub_id = cat_id
+                if sub_id not in category_tree[parent_id]["subcategories"]:
+                    category_tree[parent_id]["subcategories"][sub_id] = {
+                        "id": sub_id,
+                        "name": cat_info["name"],
+                        "amount": 0,
+                    }
+                category_tree[parent_id]["subcategories"][sub_id]["amount"] += t[
+                    "amount"
+                ]
+            else:
+                category_tree[parent_id]["direct_amount"] = (
+                    category_tree[parent_id].get("direct_amount", 0) + t["amount"]
+                )
+
+            category_tree[parent_id]["total"] += t["amount"]
+
+        sorted_parents = sorted(
+            category_tree.values(), key=lambda x: x["total"], reverse=True
         )
 
-        for cat_name, amount in sorted_cats:
-            percentage = (amount / total_expense) * 100
-            bar_length = int((amount / sorted_cats[0][1]) * 20) if sorted_cats else 0
-            bar = "█" * bar_length + "░" * (20 - bar_length)
+        for parent in sorted_parents:
+            if parent["total"] == 0:
+                continue
 
-            emoji = get_category_emoji(cat_name)
-            response += f"{emoji} {cat_name}: {amount:.2f} руб. ({percentage:.1f}%)\n"
-            response += f"   `{bar}`\n"
+            parent_percent = (
+                (parent["total"] / total_expense) * 100 if total_expense > 0 else 0
+            )
+            parent_display = get_category_display_clean(parent["id"])
+
+            response += f"│ {parent_display:<30} │ {parent['total']:>8.2f} │ {create_percentage_bar(parent_percent)} {parent_percent:>3.0f}% │\n"
+
+            sub_list = sorted(
+                parent["subcategories"].values(),
+                key=lambda x: x["amount"],
+                reverse=True,
+            )
+
+            for i, sub in enumerate(sub_list):
+                is_last_sub = i == len(sub_list) - 1
+                sub_percent = (
+                    (sub["amount"] / parent["total"]) * 100
+                    if parent["total"] > 0
+                    else 0
+                )
+                sub_display = get_category_display_clean(sub["id"])
+                prefix = "  └─ " if is_last_sub else "  ├─ "
+
+                response += f"│ {prefix}{sub_display:<27} │ {sub['amount']:>8.2f} │ {create_percentage_bar(sub_percent)} {sub_percent:>3.0f}% │\n"
+
+    response += "└────────────────────────────────┴──────────┴──────────┘\n\n"
+
+    expense_sorted = sorted(expense_trans, key=lambda x: x["amount"], reverse=True)
+    top_5 = expense_sorted[:5]
+
+    if top_5:
+        response += "🏆 **ТОП-5 КРУПНЫХ ТРАТ:**\n"
+        for i, exp in enumerate(top_5, 1):
+            cat_display = get_category_display_clean(exp["category_id"])
+            date_str = (
+                exp["date"].strftime("%d.%m")
+                if isinstance(exp["date"], datetime)
+                else datetime.strptime(exp["date"], "%Y-%m-%d %H:%M:%S.%f").strftime(
+                    "%d.%m"
+                )
+            )
+            response += f"{i}. {cat_display:<25} {exp['amount']:>8.2f} руб.  {date_str}  {exp['user_name']}\n"
+        response += "\n"
+
+    response += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    response += "📈 **СРАВНЕНИЕ С ПРЕДЫДУЩИМ ПЕРИОДОМ:**\n"
 
     previous_end = start_date - timedelta(days=1)
     previous_start = previous_end - timedelta(days=days_in_period - 1)
@@ -2306,17 +2398,14 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
         )
         prev_balance = prev_income - prev_expense
 
-        response += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        response += "📈 **СРАВНЕНИЕ С ПРЕДЫДУЩИМ ПЕРИОДОМ:**\n\n"
-
         if prev_income > 0:
             change = ((total_income - prev_income) / prev_income) * 100
             arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-            response += f"📥 Доходы: {total_income:.2f} → {prev_income:.2f} ({change:+.1f}%) {arrow}\n"
+            response += f"\n📥 Доходы: {total_income:.2f} → {prev_income:.2f} ({change:+.1f}%) {arrow}"
         if prev_expense > 0:
             change = ((total_expense - prev_expense) / prev_expense) * 100
             arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-            response += f"📤 Расходы: {total_expense:.2f} → {prev_expense:.2f} ({change:+.1f}%) {arrow}\n"
+            response += f"\n📤 Расходы: {total_expense:.2f} → {prev_expense:.2f} ({change:+.1f}%) {arrow}"
         if prev_balance != 0:
             change = (
                 ((balance - prev_balance) / abs(prev_balance)) * 100
@@ -2324,25 +2413,7 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
                 else 0
             )
             arrow = "📈" if change > 0 else "📉" if change < 0 else "➡️"
-            response += f"💰 Остаток: {balance:.2f} → {prev_balance:.2f} ({change:+.1f}%) {arrow}\n"
-
-    expenses = [t for t in transactions if t["type"] == "Расход"]
-    if expenses:
-        expenses.sort(key=lambda x: x["amount"], reverse=True)
-        response += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        response += "🏆 **ТОП-5 САМЫХ КРУПНЫХ ТРАТ:**\n\n"
-        for i, exp in enumerate(expenses[:5], 1):
-            cat_name = get_category_full_name(exp["category_id"])
-            date_str = (
-                exp["date"].strftime("%d.%m")
-                if isinstance(exp["date"], datetime)
-                else datetime.strptime(exp["date"], "%Y-%m-%d %H:%M:%S.%f").strftime(
-                    "%d.%m"
-                )
-            )
-            user_name = exp["user_name"]
-            emoji = get_category_emoji(cat_name)
-            response += f"{i}. {emoji} {cat_name}: {exp['amount']:.2f} руб. ({date_str}, {user_name})\n"
+            response += f"\n💰 Остаток: {balance:.2f} → {prev_balance:.2f} ({change:+.1f}%) {arrow}"
 
     bot.send_message(
         chat_id, response, parse_mode="Markdown", reply_markup=get_main_menu()
@@ -2350,7 +2421,7 @@ def generate_period_report(chat_id, user_id, report_type, start_date, end_date):
 
 
 # ============================================
-# ========== БЮДЖЕТНЫЕ ЛИМИТЫ (ДВУХУРОВНЕВОЕ МЕНЮ) ============
+# ========== БЮДЖЕТНЫЕ ЛИМИТЫ ============
 # ============================================
 
 
@@ -2385,7 +2456,6 @@ def set_limit_start(message):
     if not family_id:
         return
 
-    # Получаем ТОЛЬКО родительские категории расходов
     parent_categories = get_categories_db(family_id, "expense", parent_id=None)
 
     if not parent_categories:
@@ -2439,7 +2509,6 @@ def set_limit_parent_selected(message):
 
     parent_categories = state.get("parent_categories", [])
 
-    # Ищем родительскую категорию по отображаемому имени
     parent_category = None
     for cat in parent_categories:
         display_name = get_category_display_name(cat["name"])
@@ -2447,9 +2516,7 @@ def set_limit_parent_selected(message):
             parent_category = cat
             break
 
-    # Если не нашли, пробуем по чистому имени
     if not parent_category:
-        # Убираем эмодзи из выбранного
         _, clean_selected = extract_emoji_from_name(selected_display)
         for cat in parent_categories:
             _, clean_cat = extract_emoji_from_name(cat["name"])
@@ -2473,7 +2540,6 @@ def set_limit_parent_selected(message):
 
     family_id = get_user_family_db(user_id)
 
-    # Проверяем наличие подкатегорий
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -2485,7 +2551,6 @@ def set_limit_parent_selected(message):
     logger.info(f"📂 Найдено подкатегорий: {len(subcategories)}")
 
     if not subcategories:
-        # Нет подкатегорий - сразу устанавливаем лимит на родителя
         state["selected_category"] = {
             "id": parent_category["id"],
             "name": parent_category["name"],
@@ -2505,14 +2570,11 @@ def set_limit_parent_selected(message):
         bot.register_next_step_handler(msg, set_limit_amount)
         return
 
-    # Есть подкатегории - показываем выбор
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
 
-    # Кнопка "На всю категорию"
     parent_display = get_parent_display_name(parent_category["name"])
     markup.add(types.KeyboardButton(parent_display))
 
-    # Подкатегории
     for sub in subcategories:
         display_name = get_category_display_name(sub["name"])
         markup.add(types.KeyboardButton(display_name))
@@ -2553,21 +2615,16 @@ def set_limit_subcategory_selected(message):
     subcategories = state.get("subcategories", [])
 
     selected_category = None
-    is_parent = False
 
-    # Проверяем, не выбрана ли "На всю категорию"
     parent_display = get_parent_display_name(parent_category["name"])
     if selected_text == parent_display:
-        # Выбрана вся категория
         selected_category = {
             "id": parent_category["id"],
             "name": parent_category["name"],
             "is_parent": True,
         }
-        is_parent = True
         logger.info(f"✅ Выбрана вся категория: {parent_category['name']}")
     else:
-        # Ищем подкатегорию
         for sub in subcategories:
             display_name = get_category_display_name(sub["name"])
             if display_name == selected_text:
@@ -2581,7 +2638,6 @@ def set_limit_subcategory_selected(message):
                 logger.info(f"✅ Выбрана подкатегория: {sub['name']}")
                 break
 
-        # Если не нашли, пробуем по чистому имени
         if not selected_category:
             _, clean_selected = extract_emoji_from_name(selected_text)
             for sub in subcategories:
@@ -2614,8 +2670,7 @@ def set_limit_subcategory_selected(message):
     state["action"] = "set_limit"
     save_user_state_db(user_id, state)
 
-    # Формируем сообщение для ввода суммы
-    if is_parent:
+    if selected_category["is_parent"]:
         display_name = get_category_display_name(selected_category["name"])
         amount_prompt = (
             f"Введите лимит для категории {display_name} (включает все подкатегории):\n"
@@ -2641,16 +2696,8 @@ def set_limit_subcategory_selected(message):
     func=lambda message: (
         message.text
         and get_user_state_db(message.from_user.id).get("action") == "set_limit"
-        and get_user_state_db(message.from_user.id).get("stage") == "selecting_parent"
-        and message.text == "❌ Отмена"
-    )
-)
-@bot.message_handler(
-    func=lambda message: (
-        message.text
-        and get_user_state_db(message.from_user.id).get("action") == "set_limit"
         and get_user_state_db(message.from_user.id).get("stage")
-        == "selecting_subcategory"
+        in ["selecting_parent", "selecting_subcategory"]
         and message.text == "❌ Отмена"
     )
 )
@@ -2698,7 +2745,6 @@ def set_limit_amount(message):
     load_data_to_memory()
     delete_user_state_db(user_id)
 
-    # Формируем сообщение об успехе
     display_name = get_category_display_name(category_name)
     if is_parent:
         subcats = get_categories_db(family_id, "expense", parent_id=category_id)
@@ -2853,7 +2899,6 @@ def delete_limit_start(message):
 def confirm_delete_limit(message):
     user_id = message.from_user.id
     selected_label = message.text
-    # Убираем эмодзи и иконки из названия
     selected_label = selected_label.replace("📁 ", "").replace("📄 ", "").strip()
     _, clean_name = extract_emoji_from_name(selected_label)
 
@@ -3163,7 +3208,6 @@ def add_reminder_subcategory(message):
         return
 
     subcategories = state.get("subcategories", [])
-    logger.info(f"📂 Доступно подкатегорий: {len(subcategories)}")
 
     if not subcategories:
         logger.error("❌ СПИСОК ПОДКАТЕГОРИЙ ПУСТ!")
