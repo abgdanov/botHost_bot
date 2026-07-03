@@ -680,7 +680,6 @@ def get_cancel_confirmation_menu():
 
 
 def format_transaction_date(date_value):
-    """Форматирует дату из БД в читаемый вид"""
     try:
         if isinstance(date_value, datetime):
             return date_value.strftime("%d.%m.%Y %H:%M")
@@ -1668,7 +1667,7 @@ def handle_amount(message):
 
 
 # ============================================
-# ========== ОТМЕНА ОПЕРАЦИИ (ИСПРАВЛЕНО) ============
+# ========== ОТМЕНА ОПЕРАЦИИ ============
 # ============================================
 
 
@@ -2520,7 +2519,7 @@ def delete_limit_cancel(message):
 
 
 # ============================================
-# ========== НАПОМИНАНИЯ (ИСПРАВЛЕНО) ============
+# ========== НАПОМИНАНИЯ (С ПОДКАТЕГОРИЯМИ) ============
 # ============================================
 
 
@@ -2583,6 +2582,7 @@ def add_reminder_type(message):
     logger.info(f"📌 Выбран тип напоминания: {message.text} от пользователя {user_id}")
 
     state["reminder_type"] = trans_type
+    state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
 
     categories = get_categories_db(get_user_family_db(user_id), trans_type)
@@ -2600,9 +2600,10 @@ def add_reminder_type(message):
         markup.add(types.KeyboardButton(cat["name"]))
     markup.add(types.KeyboardButton("❌ Отмена"))
 
-    save_user_state_db(
-        user_id, {"action": "add_reminder_category", "categories": categories}
-    )
+    state["categories"] = categories
+    state["action"] = "add_reminder_category"
+    save_user_state_db(user_id, state)
+
     bot.send_message(
         message.chat.id, "Выберите категорию платежа:", reply_markup=markup
     )
@@ -2626,6 +2627,7 @@ def add_reminder_category(message):
 
     categories = state.get("categories", [])
     category = None
+
     for c in categories:
         if c["name"] == selected_category:
             category = c
@@ -2646,13 +2648,186 @@ def add_reminder_category(message):
     if not category:
         bot.send_message(
             message.chat.id,
-            "❌ Категория не найдена.",
+            "❌ Категория не найдена. Попробуйте еще раз.",
             reply_markup=get_main_menu(),
         )
         delete_user_state_db(user_id)
         return
 
-    state["reminder_category"] = category["name"]
+    family_id = get_user_family_db(user_id)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT id, name, type, family_id, parent_id, is_standard 
+               FROM categories 
+               WHERE parent_id = ? 
+               AND family_id = ?""",
+            (category["id"], family_id),
+        )
+        subcategories = [dict(row) for row in cursor.fetchall()]
+
+    logger.info(
+        f"📂 Найдено подкатегорий для '{category['name']}': {len(subcategories)}"
+    )
+
+    if subcategories:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+        markup.add(types.KeyboardButton("➡️ Без подкатегории"))
+        for sub in subcategories:
+            markup.add(types.KeyboardButton(sub["name"]))
+        markup.add(types.KeyboardButton("❌ Отмена"))
+
+        state["selected_category_id"] = category["id"]
+        state["selected_category_name"] = category["name"]
+        state["subcategories"] = subcategories
+        state["action"] = "add_reminder_subcategory"
+        save_user_state_db(user_id, state)
+
+        bot.send_message(
+            message.chat.id,
+            f"Вы выбрали «{category['name']}».\n\nВыберите подкатегорию или «Без подкатегории»:",
+            reply_markup=markup,
+        )
+    else:
+        state["reminder_category"] = category["name"]
+        state["reminder_category_id"] = category["id"]
+        state["action"] = "add_reminder"
+        save_user_state_db(user_id, state)
+
+        msg = bot.send_message(
+            message.chat.id,
+            "Введите название платежа (например: 'Квартплата', 'Netflix'):",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        bot.register_next_step_handler(msg, add_reminder_title)
+
+
+@bot.message_handler(
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action")
+        == "add_reminder_subcategory"
+        and message.text in ["➡️ Без подкатегории", "❌ Отмена"]
+    )
+)
+def add_reminder_subcategory_special(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    logger.info(
+        f"🔍 СПЕЦИАЛЬНАЯ КНОПКА для подкатегории: {message.text} от пользователя {user_id}"
+    )
+
+    if message.text == "❌ Отмена":
+        delete_user_state_db(user_id)
+        bot.send_message(
+            message.chat.id, "Операция отменена.", reply_markup=get_main_menu()
+        )
+        return
+
+    if message.text == "➡️ Без подкатегории":
+        if "selected_category_id" not in state or "selected_category_name" not in state:
+            bot.send_message(
+                message.chat.id,
+                "❌ Ошибка: данные потеряны. Начните заново.",
+                reply_markup=get_main_menu(),
+            )
+            delete_user_state_db(user_id)
+            return
+
+        state["reminder_category"] = state["selected_category_name"]
+        state["reminder_category_id"] = state["selected_category_id"]
+        state["action"] = "add_reminder"
+        save_user_state_db(user_id, state)
+
+        msg = bot.send_message(
+            message.chat.id,
+            "Введите название платежа (например: 'Квартплата', 'Netflix'):",
+            reply_markup=types.ReplyKeyboardRemove(),
+        )
+        bot.register_next_step_handler(msg, add_reminder_title)
+
+
+@bot.message_handler(
+    func=lambda message: (
+        message.text
+        and get_user_state_db(message.from_user.id).get("action")
+        == "add_reminder_subcategory"
+        and message.text not in ["➡️ Без подкатегории", "❌ Отмена"]
+    )
+)
+def add_reminder_subcategory(message):
+    user_id = message.from_user.id
+    state = get_user_state_db(user_id)
+    selected_subcategory = message.text
+    logger.info(
+        f"🔍 Выбрана подкатегория для напоминания: '{selected_subcategory}' от пользователя {user_id}"
+    )
+
+    if "subcategories" not in state:
+        logger.error("❌ В СОСТОЯНИИ НЕТ subcategories!")
+        bot.send_message(
+            message.chat.id,
+            "❌ Ошибка: список подкатегорий потерян. Начните заново.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    subcategories = state.get("subcategories", [])
+    logger.info(f"📂 Доступно подкатегорий: {len(subcategories)}")
+
+    if not subcategories:
+        logger.error("❌ СПИСОК ПОДКАТЕГОРИЙ ПУСТ!")
+        bot.send_message(
+            message.chat.id,
+            "❌ Ошибка: нет доступных подкатегорий. Начните заново.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    selected_sub = None
+
+    for sub in subcategories:
+        if sub["name"] == selected_subcategory:
+            selected_sub = sub
+            logger.info(f"✅ Найдено по точному совпадению: {sub['name']}")
+            break
+
+    if not selected_sub:
+        clean_label = "".join(
+            ch for ch in selected_subcategory if ch.isalnum() or ch.isspace()
+        ).strip()
+        logger.info(f"🔍 Ищем без эмодзи: '{clean_label}'")
+        for sub in subcategories:
+            clean_sub = "".join(
+                ch for ch in sub["name"] if ch.isalnum() or ch.isspace()
+            ).strip()
+            if clean_sub == clean_label:
+                selected_sub = sub
+                logger.info(f"✅ Найдено без эмодзи: {sub['name']}")
+                break
+
+    if not selected_sub:
+        logger.error(f"❌ ПОДКАТЕГОРИЯ НЕ НАЙДЕНА: '{selected_subcategory}'")
+        available = [sub["name"] for sub in subcategories]
+        logger.error(f"   ДОСТУПНО: {available}")
+        bot.send_message(
+            message.chat.id,
+            f"❌ Подкатегория не найдена. Пожалуйста, выберите из списка.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
+    logger.info(
+        f"✅ НАЙДЕНА ПОДКАТЕГОРИЯ: {selected_sub['name']} (id={selected_sub['id']})"
+    )
+
+    parent_name = state.get("selected_category_name", "Категория")
+    state["reminder_category"] = f"{parent_name} → {selected_sub['name']}"
+    state["reminder_category_id"] = selected_sub["id"]
     state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
 
@@ -2698,10 +2873,13 @@ def add_reminder_title(message):
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
+        delete_user_state_db(user_id)
         return
 
     state["reminder_title"] = message.text
+    state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
+
     msg = bot.send_message(message.chat.id, "Введите сумму платежа (цифрами):")
     bot.register_next_step_handler(msg, add_reminder_amount)
 
@@ -2714,6 +2892,7 @@ def add_reminder_amount(message):
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
+        delete_user_state_db(user_id)
         return
 
     try:
@@ -2726,7 +2905,9 @@ def add_reminder_amount(message):
         return
 
     state["reminder_amount"] = amount
+    state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
+
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add(
         types.KeyboardButton("📅 Ежемесячно"),
@@ -2751,10 +2932,12 @@ def add_reminder_frequency(message):
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
+        delete_user_state_db(user_id)
         return
 
     frequency = "monthly" if message.text == "📅 Ежемесячно" else "weekly"
     state["reminder_frequency"] = frequency
+    state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
 
     if frequency == "monthly":
@@ -2797,9 +2980,11 @@ def add_reminder_day_of_month(message):
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
+        delete_user_state_db(user_id)
         return
 
     state["reminder_day"] = day
+    state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
     ask_notify_days(message)
 
@@ -2836,9 +3021,11 @@ def add_reminder_day_of_week(message):
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
+        delete_user_state_db(user_id)
         return
 
     state["reminder_day"] = days_map[message.text]
+    state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
     ask_notify_days(message)
 
@@ -2848,12 +3035,34 @@ def ask_notify_days(message):
     state = get_user_state_db(user_id)
     logger.info(f"🔔 Запрос дней напоминания от пользователя {user_id}")
 
+    required_fields = [
+        "reminder_type",
+        "reminder_category",
+        "reminder_title",
+        "reminder_amount",
+        "reminder_frequency",
+        "reminder_day",
+    ]
+    missing_fields = [field for field in required_fields if field not in state]
+
+    if missing_fields:
+        logger.error(f"❌ Отсутствуют поля в состоянии: {missing_fields}")
+        logger.error(f"📋 Текущее состояние: {state}")
+        bot.send_message(
+            message.chat.id,
+            f"❌ Ошибка: потеряны данные напоминания. Начните заново.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
+        return
+
     if not state or state.get("action") != "add_reminder":
         bot.send_message(
             message.chat.id,
             "Ошибка сессии. Начните добавление напоминания заново.",
             reply_markup=get_main_menu(),
         )
+        delete_user_state_db(user_id)
         return
 
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -2865,6 +3074,7 @@ def ask_notify_days(message):
     markup.row(types.KeyboardButton("Не напоминать"), types.KeyboardButton("❌ Отмена"))
 
     state["waiting_for"] = "notify_days"
+    state["action"] = "add_reminder"
     save_user_state_db(user_id, state)
 
     bot.send_message(
@@ -2899,6 +3109,30 @@ def add_reminder_notify_days(message):
         bot.send_message(
             message.chat.id, "Ошибка. Начните заново.", reply_markup=get_main_menu()
         )
+        delete_user_state_db(user_id)
+        return
+
+    required_fields = [
+        "reminder_type",
+        "reminder_category",
+        "reminder_title",
+        "reminder_amount",
+        "reminder_frequency",
+        "reminder_day",
+    ]
+    missing_fields = [field for field in required_fields if field not in state]
+
+    if missing_fields:
+        logger.error(
+            f"❌ Отсутствуют поля перед созданием напоминания: {missing_fields}"
+        )
+        logger.error(f"📋 Текущее состояние: {state}")
+        bot.send_message(
+            message.chat.id,
+            f"❌ Ошибка: потеряны данные. Начните заново.",
+            reply_markup=get_main_menu(),
+        )
+        delete_user_state_db(user_id)
         return
 
     family_id = get_user_family_db(user_id)
@@ -2915,6 +3149,8 @@ def add_reminder_notify_days(message):
         "notify_days_before": notify_days,
     }
 
+    logger.info(f"📝 Создание напоминания: {reminder}")
+
     add_reminder_db(family_id, user_id, reminder)
     load_data_to_memory()
     delete_user_state_db(user_id)
@@ -2924,13 +3160,17 @@ def add_reminder_notify_days(message):
         ", ".join([f"{d} дн." for d in notify_days]) if notify_days else "Не напоминать"
     )
 
+    type_emoji = "📉" if reminder["type"] == "expense" else "📈"
+
     confirmation_text = (
         f"✅ **Напоминание создано!**\n\n"
-        f"📌 {reminder['title']}\n"
-        f"💰 {reminder['amount']:.2f} руб.\n"
-        f"📅 {freq_text}\n"
-        f"📆 Следующий платеж: {next_date.strftime('%d.%m.%Y')}\n"
-        f"🔔 Напомнить за: {notify_text}"
+        f"{type_emoji} **Тип:** {'Расход' if reminder['type'] == 'expense' else 'Доход'}\n"
+        f"📌 **Название:** {reminder['title']}\n"
+        f"💰 **Сумма:** {reminder['amount']:.2f} руб.\n"
+        f"🏷️ **Категория:** {reminder['category']}\n"
+        f"📅 **Периодичность:** {freq_text}\n"
+        f"📆 **Следующий платеж:** {next_date.strftime('%d.%m.%Y')}\n"
+        f"🔔 **Напомнить за:** {notify_text}"
     )
 
     bot.send_message(
